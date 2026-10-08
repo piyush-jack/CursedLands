@@ -1,4 +1,4 @@
-# Cursed Lands (prototype v0.4)
+# Cursed Lands (prototype v0.5)
 
 A Minecraft-style voxel multiplayer game that runs in Chrome. No Unity, no downloads, no npm packages.
 Right now it is a plain Minecraft-like world. The plan is to reskin it with tech/machine models later and add the Titans and the curse on top.
@@ -10,7 +10,10 @@ Right now it is a plain Minecraft-like world. The plan is to reskin it with tech
 4. To test multiplayer, open a second tab in a private window and create another account.
 
 ## Controls
-- WASD move, Space jump / swim up, Shift sprint, mouse look, F fly (Space up, C down)
+- WASD move, Space jump / swim up, Shift sprint, mouse look, V fly (Space up, C down)
+- **F grapple gun**: fires at what you are looking at (55 blocks) and reels you in. Tap F again or press Space to let go (Space launches you). Great for climbing cliffs and arena towers
+- **C slide**: sprint-slide in your move direction, press Space mid-slide to slide-jump. You also shrink to fit through 1-block gaps
+- **T** cycles first person / third person behind / third person in front
 - 1 sword, 2 bow, 3-9 blocks (mouse wheel cycles)
 - Left click: swing the sword at mobs, or mine the block you look at. Right click: place a block
 - Bow: hold left click to draw, release to shoot. Aim at the head for a headshot (2.5x damage)
@@ -79,3 +82,17 @@ Cloudflare Pages / Netlify / Vercel will NOT work, they cannot hold WebSocket co
 2. Cursed zones: a Titan per zone, the 5-minute curse timer, cure + camps
 3. Taming/overriding mobs (Horizon style), mounts
 4. The ending loop: the Curse passes to the winner, who becomes a Titan in the next world
+
+## PvP and the Arena
+- Swords and arrows hurt other players anywhere in the world (damage is scaled for 20 HP). Melee knocks the victim back. Dying in the open sends you to spawn.
+- **The Arena** is a walled pit with a ziggurat, pillars, cover and four climbable corner towers, placed from the world seed (the top-left info panel shows its distance and direction, or type `/arena` in chat to teleport there, `/spawn` to come back). It is not buildable.
+- Stepping inside makes it a **free for all**: hotbar slots 3-6 become guns with ammo (refilled on every respawn, plus a top-up and +3 hearts per kill). A scoreboard of kills / deaths shows at the top.
+
+| Gun | Damage | Fire rate | Notes |
+|---|---|---|---|
+| Pistol | 7 | 3.3/s | accurate |
+| Rifle | 3 | 9/s, hold to fire | spreads when sprayed |
+| Shotgun | 8 pellets x 3.5 | 1.2/s | deadly up close |
+| Sniper | 15 | 0.7/s | right click zooms, headshot = 30 |
+
+Headshots do double damage (the shotgun 1.5x). Guns are server-side hitscan and only work inside the arena. `/arena` and `/spawn` are the only chat commands.

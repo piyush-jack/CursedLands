@@ -35,10 +35,80 @@ function fbm(x, z) {
   for (let i = 0; i < 4; i++) { v += vnoise(x * f, z * f, SEED + i * 101) * amp; f *= 2; amp *= 0.5; }
   return v;
 }
-export function heightAt(x, z) {
+export function rawHeight(x, z) {
   const n = Math.max(0, Math.min(1, (fbm(x * 0.008, z * 0.008) - 0.47) * 2.2 + 0.5)); // stretch contrast: real hills, valleys, peaks
   const m = fbm(x * 0.03 + 100, z * 0.03 + 100);
   return Math.min(52, Math.floor(14 + n * 38 + m * 6));
+}
+
+/* ---------- the arena: a walled free-for-all pit, placed deterministically from the seed ---------- */
+export const ARENA_HALF = 24;   // footprint is 49 x 49 blocks
+let _arena = null, _arenaSeed = null;
+export function arena() {
+  if (_arena && _arenaSeed === SEED) return _arena;
+  let pick = null;
+  const ok = (cx, cz) => {
+    let lo = 99, hi = 0, sum = 0;
+    for (const dx of [-ARENA_HALF, 0, ARENA_HALF]) for (const dz of [-ARENA_HALF, 0, ARENA_HALF]) {
+      const h = rawHeight(cx + dx, cz + dz);
+      lo = Math.min(lo, h); hi = Math.max(hi, h); sum += h;
+    }
+    return lo >= SEA + 2 && hi <= 44 && hi - lo <= 12 ? Math.round(sum / 9) : 0;
+  };
+  search:
+  for (let r = 0; r <= 240; r += 8) {
+    const steps = r === 0 ? 1 : Math.ceil(r / 4);
+    for (let k = 0; k < steps; k++) {
+      const a = (k / steps) * Math.PI * 2;
+      const cx = Math.round(120 + Math.cos(a) * r), cz = Math.round(40 + Math.sin(a) * r);
+      const f = ok(cx, cz);
+      if (f) { pick = { cx, cz, floor: Math.max(SEA + 3, Math.min(40, f)) }; break search; }
+    }
+  }
+  if (!pick) pick = { cx: 120, cz: 40, floor: SEA + 3 };
+  _arena = pick; _arenaSeed = SEED;
+  return pick;
+}
+// m widens the zone (used to keep mobs and trees away)
+export function inArena(x, z, m = 0) {
+  const a = arena();
+  return Math.abs(Math.floor(x) - a.cx) <= ARENA_HALF + m && Math.abs(Math.floor(z) - a.cz) <= ARENA_HALF + m;
+}
+export function heightAt(x, z) { return inArena(x, z) ? arena().floor : rawHeight(x, z); }
+// block at a world position inside the arena footprint, or -1 outside it. The floor is y = arena().floor.
+export function arenaBlockAt(x, y, z) {
+  const a = arena();
+  const dx = x - a.cx, dz = z - a.cz, ax = Math.abs(dx), az = Math.abs(dz);
+  if (ax > ARENA_HALF || az > ARENA_HALF) return -1;
+  const F = a.floor;
+  if (y < F) return B.STONE;
+  if (y === F) return (((x >> 2) + (z >> 2)) & 1) ? B.STONE : B.COBBLE;
+  if (y > F + 40) return -1;
+  const h = y - F;
+  if (ax >= 23 || az >= 23) {                                   // outer wall, 2 thick, with a gate in the middle of each side
+    if ((az >= 23 && ax <= 2) || (ax >= 23 && az <= 2)) return h <= 5 ? 0 : h <= 9 ? B.PLANKS : 0;
+    if (h <= 9) return h === 9 ? B.STONE : B.COBBLE;
+    if (h === 10 && ((x + z) & 1) === 0) return B.COBBLE;       // battlements
+    return 0;
+  }
+  const m = Math.max(ax, az);
+  if ((m <= 5 && h <= 1) || (m <= 3 && h <= 2) || (m <= 1 && h <= 3)) return B.PLANKS;   // central ziggurat
+  if (ax >= 11 && ax <= 12 && az >= 11 && az <= 12 && h <= 6) return B.LOG;              // four pillars
+  if (((az === 6 && ax >= 14 && ax <= 18) || (ax === 6 && az >= 14 && az <= 18)) && h <= 2) return B.COBBLE;   // low cover walls
+  if (ax >= 12 && ax <= 17 && az >= 18 && az <= 22 && h <= ax - 11) return B.COBBLE;     // stairs up to each corner tower
+  if (ax >= 18 && ax <= 22 && az >= 18 && az <= 22) {                                    // corner towers
+    if (h === 6) return B.PLANKS;
+    if (h < 6 && (ax === 18 || ax === 22) && (az === 18 || az === 22)) return B.LOG;
+    if (h === 7 && az === 18) return B.STONE;
+    if (ax === 22 && az === 22 && h >= 7 && h <= 16) return B.LOG;                        // flag poles, visible from afar
+  }
+  return 0;
+}
+export function arenaSpawns() {
+  const a = arena(), out = [];
+  for (const [dx, dz] of [[0, 18], [0, -18], [18, 0], [-18, 0], [15, 15], [-15, 15], [15, -15], [-15, -15]])
+    out.push({ x: a.cx + dx + 0.5, y: a.floor + 1, z: a.cz + dz + 0.5 });
+  return out;
 }
 
 /* ---------- biomes ---------- */
@@ -66,6 +136,7 @@ export function surfaceAt(x, z, h) {
 
 /* ---------- surface features: 1 oak, 2 cactus, 3 spruce ---------- */
 export function featureAt(x, z, h) {
+  if (inArena(x, z)) return 0;
   if (h <= SEA + 2 || h >= 44) return 0;
   const bio = biomeAt(x, z);
   const r = hash2(x, z, SEED + 7);
@@ -121,7 +192,7 @@ export function spawnPoint() {
       for (let dx = -r; dx <= r; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
         const h = heightAt(dx, dz);
-        if (h >= SEA + 2 && h < 40 && !treeAt(dx, dz, h) && openGround(dx, dz)) return { x: dx + 0.5, z: dz + 0.5 };
+        if (h >= SEA + 2 && h < 40 && !inArena(dx, dz, 6) && !treeAt(dx, dz, h) && openGround(dx, dz)) return { x: dx + 0.5, z: dz + 0.5 };
       }
     }
   }

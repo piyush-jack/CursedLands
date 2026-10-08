@@ -33,11 +33,13 @@ module.exports = function createMobs(T, hooks) {
   /* ---------- terrain checks ---------- */
   function landOk(x, z) {
     const fx = Math.floor(x), fz = Math.floor(z);
+    if (T.inArena(fx, fz, 3)) return false;
     const h = T.heightAt(fx, fz);
     return h >= T.SEA && !T.treeAt(fx, fz, h);
   }
   function blocked(nx, nz, curY) {
     const fx = Math.floor(nx), fz = Math.floor(nz);
+    if (T.inArena(fx, fz, 2)) return true;
     const h = T.heightAt(fx, fz);
     if (h < T.SEA) return true;                     // water
     if (T.treeAt(fx, fz, h)) return true;           // tree trunk

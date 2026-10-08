@@ -45,6 +45,13 @@
   #chatin{position:fixed;left:8px;bottom:40px;width:340px;display:none;pointer-events:auto;box-sizing:border-box;padding:6px;background:#000a;border:1px solid #666;color:#fff;font:inherit}
   #help{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000a;z-index:5;text-align:center;line-height:1.8}
   #msg{position:fixed;top:40%;width:100%;text-align:center;display:none;z-index:6;font-size:20px;text-shadow:0 2px 4px #000}
+  #arenahud{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:none;text-align:center;font-size:12px;line-height:1.5;text-shadow:0 1px 2px #000;background:#0007;border:1px solid #ffd23a66;border-radius:6px;padding:6px 16px;min-width:170px}
+  #arenahud .t{color:#ffd23a;letter-spacing:2px;font-weight:bold}
+  #score .me{color:#7be0ff}
+  #scope{position:fixed;inset:0;pointer-events:none;display:none;z-index:2;background:radial-gradient(circle at 50% 50%,transparent 0,transparent 26vmin,#000 27vmin)}
+  #scope:before,#scope:after{content:"";position:absolute;background:#000c}
+  #scope:before{left:50%;top:0;bottom:0;width:1px}
+  #scope:after{top:50%;left:0;right:0;height:1px}
   #craft{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000b;z-index:5}
   #craftbox{width:520px;max-width:94vw;max-height:88vh;overflow:auto;background:#141a22;border:1px solid #3a2f55;border-radius:10px;padding:18px}
   #craftbox h2{margin:0 0 4px;color:#c9a7ff}
@@ -78,11 +85,13 @@
   </div>
 </div>
 <div id="waterov"></div>
+<div id="scope"></div>
 <div id="hurt"></div>
 <div id="hud">
   <div id="cross"></div>
   <div id="draw"><i></i></div>
   <div id="info"></div>
+  <div id="arenahud"><div class="t">ARENA &middot; FREE FOR ALL</div><div id="score"></div></div>
   <div id="mats"></div>
   <div id="toast"></div>
   <div id="chat"></div>
@@ -97,10 +106,12 @@
     <h2>Paused</h2>
     <div>Click to play</div>
     <div style="color:#9aa;margin-top:10px">
-      WASD move &nbsp; Space jump / swim &nbsp; Shift sprint &nbsp; F fly<br>
+      WASD move &nbsp; Space jump / swim &nbsp; Shift sprint &nbsp; V fly<br>
+      <b>F grapple gun</b> (tap again or Space to let go) &nbsp; <b>C slide</b> (Space mid-slide to slide-jump) &nbsp; <b>T</b> third person<br>
       1 sword &nbsp; 2 bow &nbsp; 3-9 blocks &nbsp; wheel cycles<br>
       Left click: swing / mine &nbsp; Right click: place block &nbsp; Bow: hold left click, release to shoot<br>
-      Headshots on mobs hit weak points for big damage<br>
+      Headshots on mobs and players hit weak points for big damage. Swords and arrows hurt other players.<br>
+      <b>The Arena</b> (see the Arena distance top-left, or type /arena): free for all. Guns appear on slots 3-6, right click zooms the sniper.<br>
       Q block palette &nbsp; E crafting &nbsp; R switch arrow &nbsp; G eat raw meat &nbsp; Enter chat<br>
       Zombies and spiders roam at night. Dig for coal, iron and diamond.
     </div>

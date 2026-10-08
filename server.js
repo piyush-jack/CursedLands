@@ -257,6 +257,19 @@ const ARROW_DEF = {
 };
 const WEAK_MULT = 2.5;
 const ARROW_GRAVITY = 20;
+const SWORD_NAMES = ['Wooden Sword', 'Iron Sword', 'Diamond Sword'];
+const PVP_MELEE = 0.6, PVP_ARROW = 0.55;   // player health is 20, so mob-tuned damage is scaled down against players
+
+// arena guns (hitscan, server-side). Only work inside the arena; ammo is handed out on entry and on every respawn.
+const GUNS = {
+  pistol:  { name: 'Pistol',  dmg: 7,   cd: 300,  pellets: 1, spread: 0.004, range: 90,  ammo: 90,  head: 2 },
+  rifle:   { name: 'Rifle',   dmg: 3,   cd: 110,  pellets: 1, spread: 0.02,  range: 90,  ammo: 240, head: 2 },
+  shotgun: { name: 'Shotgun', dmg: 3.5, cd: 850,  pellets: 8, spread: 0.07,  range: 28,  ammo: 32,  head: 1.5 },
+  sniper:  { name: 'Sniper',  dmg: 15,  cd: 1500, pellets: 1, spread: 0,     range: 220, ammo: 16,  head: 2 },
+};
+const freshGuns = () => Object.fromEntries(Object.entries(GUNS).map(([k, g]) => [k, g.ammo]));
+const arenaStats = new Map();   // lowercase name -> { k, d } (kept until the server restarts)
+const statOf = p => { const k = p.name.toLowerCase(); let s = arenaStats.get(k); if (!s) { s = { k: 0, d: 0 }; arenaStats.set(k, s); } return s; };
 
 const RECIPES = [
   { id: 'a_wood',  name: 'Arrows x5',       desc: 'Plain arrows.', cost: { wood: 1, feather: 1 }, give: { a_wood: 5 } },
@@ -310,20 +323,115 @@ function killMob(m, killer) {
   broadcast({ t: 'mobdie', id: m.id });
 }
 
-function hurtPlayer(p, dmg, mob) {
+// src is { label } for mobs or { player, weapon } for players. Returns true if this hit killed the player.
+function hurtPlayer(p, dmg, src) {
   const now = Date.now();
-  if (now < p.invuln) return;
+  if (now < p.invuln) return false;
   p.hp -= dmg;
   p.lastHurt = now;
   send(p.ws, { t: 'hurt', dmg });
-  if (p.hp <= 0) {
-    p.hp = p.maxHp;
-    p.invuln = now + 4000;
-    p.x = SPAWN.x; p.y = 60; p.z = SPAWN.z; p.hasPos = false;
-    broadcast({ t: 'chat', name: '*', text: `${p.name} was slain by a ${mobsys.TYPES[mob.type].label}` });
-    send(p.ws, { t: 'respawn', x: SPAWN.x, z: SPAWN.z });
+  if (p.hp <= 0) { killPlayer(p, src); return true; }
+  sendHp(p);
+  return false;
+}
+function pickArenaSpawn(except) {
+  const others = [...players.values()].filter(q => q !== except && q.inArena);
+  let best = null, bestD = -1;
+  for (const sp of T.arenaSpawns()) {
+    let d = 1e9;
+    for (const q of others) d = Math.min(d, Math.hypot(q.x - sp.x, q.z - sp.z));
+    d += Math.random() * 4;
+    if (d > bestD) { bestD = d; best = sp; }
+  }
+  return best;
+}
+function setArena(p, on) {
+  p.inArena = on;
+  p.guns = on ? freshGuns() : null;
+  send(p.ws, { t: 'arena', on, guns: p.guns });
+  if (on) broadcast({ t: 'chat', name: '*', text: `${p.name} entered the arena` });
+}
+function killPlayer(p, src) {
+  const now = Date.now();
+  const k = src.player && src.player !== p ? src.player : null;
+  const wasArena = p.inArena;
+  p.hp = p.maxHp;
+  p.hasPos = false;
+  p.invuln = now + (wasArena ? 3000 : 4000);
+  const how = k ? `${k.name} killed ${p.name}${src.weapon ? ' with ' + src.weapon : ''}` : `${p.name} was slain by ${src.label || 'something'}`;
+  broadcast({ t: 'chat', name: '*', text: how });
+  if (wasArena) {
+    statOf(p).d++;
+    if (k) {
+      statOf(k).k++;
+      if (k.inArena) {                                     // reward: heal and top up ammo
+        k.hp = Math.min(k.maxHp, k.hp + 6); sendHp(k);
+        for (const [g, def] of Object.entries(GUNS)) k.guns[g] = Math.min(def.ammo, (k.guns[g] | 0) + Math.ceil(def.ammo * 0.25));
+        send(k.ws, { t: 'ammo', guns: k.guns });
+      }
+    }
+    const sp = pickArenaSpawn(p);
+    p.x = sp.x; p.y = sp.y; p.z = sp.z;
+    p.guns = freshGuns();
+    send(p.ws, { t: 'respawn', x: sp.x, z: sp.z, msg: 'Eliminated. Back into the pit...' });
+    send(p.ws, { t: 'arena', on: true, guns: p.guns });
+  } else {
+    p.x = SPAWN.x; p.y = 60; p.z = SPAWN.z;
+    send(p.ws, { t: 'respawn', x: SPAWN.x, z: SPAWN.z, msg: 'You were slain. Respawning...' });
   }
   sendHp(p);
+}
+
+// ray against a sphere: distance along the (normalised) ray to the first contact, or null
+function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
+  const fx = cx - ox, fy = cy - oy, fz = cz - oz;
+  const t = fx * dx + fy * dy + fz * dz;
+  if (t < 0) return null;
+  const perp2 = fx * fx + fy * fy + fz * fz - t * t;
+  if (perp2 > r * r) return null;
+  return Math.max(0, t - Math.sqrt(r * r - perp2));
+}
+function solidSrv(x, y, z) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const ab = T.arenaBlockAt(ix, iy, iz);
+  if (ab >= 0) return ab > 0 && ab !== T.B.WATER;
+  return iy <= T.heightAt(ix, iz);
+}
+// player hit spheres: legs/torso x2 and the head (weak point). Sliding players are low to the ground.
+function playerSpheres(q) {
+  return q.sl
+    ? [[q.y + 0.35, 0.5, false], [q.y + 0.85, 0.32, true]]
+    : [[q.y + 0.5, 0.5, false], [q.y + 1.05, 0.5, false], [q.y + 1.62, 0.3, true]];
+}
+function fireGun(me, gd, key, dx, dy, dz) {
+  const ox = me.x, oy = me.y + (me.sl ? 0.85 : 1.6), oz = me.z;
+  const targets = [...players.values()].filter(q => q !== me && q.inArena && q.hasPos);
+  const dmgBy = new Map(), ends = [];
+  for (let i = 0; i < gd.pellets; i++) {
+    let px = dx + (Math.random() - 0.5) * 2 * gd.spread, py = dy + (Math.random() - 0.5) * 2 * gd.spread, pz = dz + (Math.random() - 0.5) * 2 * gd.spread;
+    const pl = Math.hypot(px, py, pz); px /= pl; py /= pl; pz /= pl;
+    let L = gd.range;
+    for (let s = 0.5; s <= gd.range; s += 0.5) if (solidSrv(ox + px * s, oy + py * s, oz + pz * s)) { L = s; break; }
+    let best = null;
+    for (const q of targets) {
+      for (const [cy, r, head] of playerSpheres(q)) {
+        const t = raySphere(ox, oy, oz, px, py, pz, q.x, cy, q.z, r);
+        if (t !== null && t < L && (!best || t < best.t)) best = { t, q, head };
+      }
+    }
+    const te = best ? best.t : L;
+    ends.push([+(ox + px * te).toFixed(2), +(oy + py * te).toFixed(2), +(oz + pz * te).toFixed(2)]);
+    if (best) {
+      const acc = dmgBy.get(best.q) || { dmg: 0, head: false };
+      acc.dmg += gd.dmg * (best.head ? gd.head : 1); acc.head = acc.head || best.head;
+      dmgBy.set(best.q, acc);
+    }
+  }
+  broadcast({ t: 'shot', g: key, o: [+ox.toFixed(2), +oy.toFixed(2), +oz.toFixed(2)], e: ends });
+  for (const [q, r] of dmgBy) {
+    const killed = hurtPlayer(q, r.dmg, { player: me, weapon: gd.name });
+    send(me.ws, { t: 'hitmark', weak: r.head, dmg: Math.round(r.dmg), killed });
+  }
 }
 
 /* arrows */
@@ -355,6 +463,29 @@ function updateArrows(dt, now) {
         if (t !== null && (!best || t < best.t - 1e-6)) best = { t, m, weak: part === 'head' };
       }
     }
+    // players can be shot too
+    const owner0 = players.get(a.owner);
+    let pbest = null;
+    for (const q of players.values()) {
+      if (q.id === a.owner || !q.hasPos) continue;
+      if (Math.abs(q.x - p0.x) > 60 || Math.abs(q.z - p0.z) > 60) continue;
+      for (const [cy, r, head] of playerSpheres(q)) {
+        const t = segSphere(p0, p1, { x: q.x, y: cy, z: q.z, r });
+        if (t !== null && (!pbest || t < pbest.t)) pbest = { t, q, weak: head };
+      }
+    }
+    if (pbest && (!best || pbest.t < best.t)) {
+      const def = ARROW_DEF[a.type];
+      const bow = owner0 ? (owner0.inv.bow | 0) : 0;
+      let dmg = def.dmg * (BOW_MULT[bow] || 1) * (0.35 + 0.65 * a.draw) * PVP_ARROW;
+      if (pbest.weak) dmg *= WEAK_MULT;
+      const killed = hurtPlayer(pbest.q, dmg, owner0 ? { player: owner0, weapon: 'Bow' } : { label: 'a stray arrow' });
+      if (owner0) send(owner0.ws, { t: 'hitmark', weak: pbest.weak, dmg: Math.round(dmg), killed });
+      const hx = p0.x + (p1.x - p0.x) * pbest.t, hy = p0.y + (p1.y - p0.y) * pbest.t, hz = p0.z + (p1.z - p0.z) * pbest.t;
+      broadcast({ t: 'arrowend', id: a.id, hit: true, x: hx, y: hy, z: hz });
+      arrows.delete(a.id);
+      continue;
+    }
     if (best) {
       const owner = players.get(a.owner);
       const def = ARROW_DEF[a.type];
@@ -370,7 +501,7 @@ function updateArrows(dt, now) {
       continue;
     }
     const gy = T.heightAt(Math.floor(a.x), Math.floor(a.z)) + 1;
-    if (a.y < gy || a.t > 6) {
+    if (T.arenaBlockAt(Math.floor(a.x), Math.floor(a.y), Math.floor(a.z)) > 0 || a.y < gy || a.t > 6) {
       broadcast({ t: 'arrowend', id: a.id, hit: false, x: a.x, y: Math.max(a.y, gy), z: a.z });
       arrows.delete(a.id);
     }
@@ -388,7 +519,7 @@ function onConnection(ws) {
   const me = {
     id, name: ws.userName, x: 0, y: 60, z: 0, yaw: 0, pitch: 0, ws, inv: acct.inv,
     lastChat: 0, hasPos: false, hp: 20, maxHp: 20, lastHurt: 0, invuln: Date.now() + 3000,
-    lastShot: 0, lastMelee: 0, lastEat: 0, sentHp: 40,
+    lastShot: 0, lastMelee: 0, lastEat: 0, sentHp: 40, sl: 0, inArena: false, guns: null, gunT: {},
   };
   players.set(id, me);
 
@@ -410,7 +541,7 @@ function onConnection(ws) {
 
     if (m.t === 'pos') {
       if (![m.x, m.y, m.z, m.yaw, m.pitch].every(Number.isFinite)) return;
-      me.x = m.x; me.y = m.y; me.z = m.z; me.yaw = m.yaw; me.pitch = m.pitch; me.hasPos = true;
+      me.x = m.x; me.y = m.y; me.z = m.z; me.yaw = m.yaw; me.pitch = m.pitch; me.sl = m.sl ? 1 : 0; me.hasPos = true;
     } else if (m.t === 'edit') {
       const { x, y, z, b } = m;
       if (![x, y, z, b].every(Number.isInteger)) return;
@@ -419,6 +550,7 @@ function onConnection(ws) {
         const dx = x + 0.5 - me.x, dy = y + 0.5 - (me.y + 1.5), dz = z + 0.5 - me.z;
         if (dx * dx + dy * dy + dz * dz > 12 * 12) return; // out of reach
       }
+      if (T.inArena(x, z)) return;      // the arena is not buildable
       if (b === 0 && y === 0) return;   // the bottom layer is bedrock
       const k = `${x},${y},${z}`;
       // breaking a natural tree trunk or ore gives its drop (once per block)
@@ -433,7 +565,14 @@ function onConnection(ws) {
       if (now - me.lastChat < 500) return;
       me.lastChat = now;
       const text = String(m.text || '').slice(0, 200).trim();
-      if (text) broadcast({ t: 'chat', name: me.name, text });
+      if (text === '/arena') {
+        const sp = pickArenaSpawn(me);
+        me.x = sp.x; me.y = sp.y; me.z = sp.z; me.hasPos = false; me.invuln = now + 2000;
+        send(ws, { t: 'respawn', x: sp.x, z: sp.z, msg: 'Teleported to the arena' });
+      } else if (text === '/spawn') {
+        me.x = SPAWN.x; me.y = 60; me.z = SPAWN.z; me.hasPos = false; me.invuln = now + 2000;
+        send(ws, { t: 'respawn', x: SPAWN.x, z: SPAWN.z, msg: 'Teleported to spawn' });
+      } else if (text) broadcast({ t: 'chat', name: me.name, text });
     } else if (m.t === 'melee') {
       if (now - me.lastMelee < 350) return;
       const mob = mobsys.mobs.get(m.id);
@@ -468,6 +607,33 @@ function onConnection(ws) {
       };
       arrows.set(a.id, a);
       broadcast({ t: 'arrow', id: a.id, a: type, x: a.x, y: a.y, z: a.z, vx: a.vx, vy: a.vy, vz: a.vz });
+    } else if (m.t === 'pmelee') {
+      if (now - me.lastMelee < 350) return;
+      const q = players.get(m.id);
+      if (!q || q === me || !q.hasPos) return;
+      if (Math.hypot(q.x - me.x, (q.y + 0.9) - (me.y + 1.6), q.z - me.z) > 4.8) return;
+      me.lastMelee = now;
+      const tier = Math.min(2, me.inv.sword | 0);
+      const dmg = SWORD_DMG[tier] * PVP_MELEE;
+      const killed = hurtPlayer(q, dmg, { player: me, weapon: SWORD_NAMES[tier] });
+      send(ws, { t: 'hitmark', weak: false, dmg: Math.round(dmg), killed });
+      const kx = q.x - me.x, kz = q.z - me.z, kl = Math.hypot(kx, kz) || 1;
+      send(q.ws, { t: 'kb', vx: kx / kl * 7, vy: 4, vz: kz / kl * 7 });
+    } else if (m.t === 'gun') {
+      const gd = GUNS[m.g];
+      if (!gd || !me.inArena || !me.guns || (me.guns[m.g] | 0) <= 0) return;
+      if (now - (me.gunT[m.g] || 0) < gd.cd - 25) return;
+      let { dx, dy, dz } = m;
+      if (![dx, dy, dz].every(Number.isFinite)) return;
+      const len = Math.hypot(dx, dy, dz);
+      if (len < 0.01) return;
+      me.gunT[m.g] = now;
+      me.guns[m.g]--;
+      send(ws, { t: 'ammo', guns: me.guns });
+      fireGun(me, gd, m.g, dx / len, dy / len, dz / len);
+    } else if (m.t === 'grap') {
+      if (m.on && ![m.x, m.y, m.z].every(Number.isFinite)) return;
+      broadcast({ t: 'grap', id, on: !!m.on, x: m.x, y: m.y, z: m.z }, id);
     } else if (m.t === 'eat') {
       if ((me.inv.meat | 0) <= 0 || me.hp >= me.maxHp || now - me.lastEat < 1200) return;
       me.lastEat = now;
@@ -513,6 +679,17 @@ function startLoops() {
     mobsys.update(dt, now, list);
     updateArrows(dt, now);
     for (const p of list) {
+      if (p.hasPos) { const ia = T.inArena(p.x, p.z); if (ia !== p.inArena) setArena(p, ia); }
+    }
+    if (tickN % 20 === 0) {
+      const inA = list.filter(p => p.inArena);
+      if (inA.length) {
+        const rows = inA.map(p => { const st = statOf(p); return [p.name, st.k, st.d]; }).sort((a, b) => b[1] - a[1] || a[2] - b[2]).slice(0, 8);
+        const msg = JSON.stringify({ t: 'score', list: rows });
+        for (const p of inA) p.ws.send(msg);
+      }
+    }
+    for (const p of list) {
       if (now - p.lastHurt > 6000 && p.hp < p.maxHp) {
         p.hp = Math.min(p.maxHp, p.hp + 0.4 * dt);
         if (Math.floor(p.hp * 2) !== p.sentHp && tickN % 20 === 0) sendHp(p);
@@ -524,7 +701,7 @@ function startLoops() {
   // everyone's positions to everyone, ~12 Hz
   setInterval(() => {
     if (players.size < 2) return;
-    const list = [...players.values()].map(p => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.yaw.toFixed(2), +p.pitch.toFixed(2)]);
+    const list = [...players.values()].map(p => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.yaw.toFixed(2), +p.pitch.toFixed(2), p.sl]);
     const msg = JSON.stringify({ t: 'state', p: list });
     for (const p of players.values()) p.ws.send(msg);
   }, 80);
@@ -541,7 +718,7 @@ import('./public/terrain.mjs').then(mod => {
   T.setSeed(SEED);
   SPAWN = T.spawnPoint();
   mobsys = createMobs(T, {
-    onHurtPlayer: hurtPlayer,
+    onHurtPlayer: (p, dmg, mob) => hurtPlayer(p, dmg, { label: 'a ' + mobsys.TYPES[mob.type].label }),
     onGone: id => broadcast({ t: 'mobdie', id, gone: true }),
     isNight,
   });
