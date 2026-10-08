@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CS, CH, SEA, B, heightAt, featureAt, trunkHeight, hash2, setSeed, surfaceAt, oreAt, biomeAt, arena, inArena, ARENA_HALF, arenaBlockAt } from './terrain.mjs';
+import { CS, CH, SEA, B, heightAt, featureAt, trunkHeight, hash2, setSeed, surfaceAt, oreAt, biomeAt, arenas, ARENA_KINDS, zoneAt, inArena, arenaBlockAt } from './terrain.mjs';
 import { createMob, addCreatureLights, setCreatureDaylight, createPlayerModel, createArmMesh } from './creatures.js';
 import { getAtlas, tileUV, BLOCK_DEFS, PALETTE_BLOCKS, blockIcon, blockCubeGeometry, itemMesh, spriteURL, cloudTexture } from './textures.js';
 
@@ -21,17 +21,17 @@ for (const id of Object.keys(BLOCK_DEFS)) {
   TILES[id] = { top: tileUV(d.top), side: tileUV(d.side), bot: tileUV(d.bot) };
 }
 const BLOCK_NAME = id => BLOCK_DEFS[id].name;
-let arenaOn = false, gunAmmo = {}, scoreList = [], myName = '';
+let arenaOn = false, zoneName = null, gunAmmo = {}, scoreList = [], myName = '';
 function slotItem(i) { return arenaOn && i >= 2 && i < 6 ? { k: 'gun', g: GUN_SLOTS[i - 2] } : HOTBAR[i]; }
 const curItem = () => slotItem(selected);
 
 const DEFAULT_BLOCKS = [3, 2, 8, 5, 4, 1, 10];
 const GUN_SLOTS = ['pistol', 'rifle', 'shotgun', 'sniper'];     // replace hotbar slots 3-6 while inside the arena
-const GUNS = {
-  pistol:  { name: 'Pistol',  cd: 300,  auto: false, kick: 0.7 },
-  rifle:   { name: 'Rifle',   cd: 110,  auto: true,  kick: 0.35 },
-  shotgun: { name: 'Shotgun', cd: 850,  auto: false, kick: 1.3 },
-  sniper:  { name: 'Sniper',  cd: 1500, auto: false, kick: 1.6 },
+const GUNS = {   // spread / pellets / range mirror the server (used to draw the shot instantly on this screen)
+  pistol:  { name: 'Pistol',  cd: 300,  auto: false, kick: 0.7, spread: 0.004, pellets: 1, range: 90 },
+  rifle:   { name: 'Rifle',   cd: 110,  auto: true,  kick: 0.35, spread: 0.02, pellets: 1, range: 90 },
+  shotgun: { name: 'Shotgun', cd: 850,  auto: false, kick: 1.3, spread: 0.07, pellets: 8, range: 28 },
+  sniper:  { name: 'Sniper',  cd: 1500, auto: false, kick: 1.6, spread: 0, pellets: 1, range: 220 },
 };
 const HOTBAR = [{ k: 'sword' }, { k: 'bow' }, ...DEFAULT_BLOCKS.map(id => ({ k: 'block', id }))];
 try {
@@ -123,11 +123,13 @@ function genChunk(cx, cz) {
   }
   const em = world.edits.get(cx + ',' + cz);
   if (em) for (const [i, b] of em) data[i] = b;
-  const A = arena();                                       // the arena structure always wins over terrain and edits
-  if (ox + CS > A.cx - ARENA_HALF && ox <= A.cx + ARENA_HALF && oz + CS > A.cz - ARENA_HALF && oz <= A.cz + ARENA_HALF) {
+  const AR = arenas();                                     // arena structures always win over terrain and edits
+  for (const kind of ARENA_KINDS) {
+    const A = AR[kind];
+    if (!(ox + CS > A.cx - A.half && ox <= A.cx + A.half && oz + CS > A.cz - A.half && oz <= A.cz + A.half)) continue;
     for (let lz = 0; lz < CS; lz++) for (let lx = 0; lx < CS; lx++) {
       const wx = ox + lx, wz = oz + lz;
-      if (!inArena(wx, wz)) continue;
+      if (zoneAt(wx, wz) !== kind) continue;
       for (let y = A.floor; y < CH && y <= A.floor + 40; y++) data[cIdx(lx, y, lz)] = arenaBlockAt(wx, y, wz);
     }
   }
@@ -589,37 +591,93 @@ function updateParticles(dt) {
   }
 }
 
-/* ---------- gun tracers ---------- */
-const tracers = [];
+/* ---------- gun tracers: pooled streaks that fly from the muzzle to the point the shot lands ---------- */
 function spawnSparks(x, y, z) {
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     const m = new THREE.Mesh(partGeo, boxMat(0xfff2b0));
     m.position.set(x, y, z); m.scale.setScalar(0.6);
     scene.add(m);
     particles.push({ m, vx: (Math.random() - 0.5) * 4, vy: Math.random() * 3, vz: (Math.random() - 0.5) * 4, life: 0.2 + Math.random() * 0.15 });
   }
 }
-function spawnTracers(m) {
-  for (const e of m.e) {
-    const dx = e[0] - m.o[0], dy = e[1] - m.o[1], dz = e[2] - m.o[2], len = Math.hypot(dx, dy, dz);
-    if (len < 1) continue;
-    const k = Math.min(1.2, len * 0.5) / len;                       // start just in front of the muzzle
-    const ax = m.o[0] + dx * k, ay = m.o[1] - 0.18 + dy * k, az = m.o[2] + dz * k;
-    const mat = new THREE.MeshBasicMaterial({ color: 0xfff0a8, transparent: true, opacity: 0.95, fog: false });
+const tracerPool = [];
+function ensureTracerPool() {                               // built on first use (needs the helpers defined further down)
+  if (tracerPool.length) return;
+  for (let i = 0; i < 28; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xfff0a8, transparent: true, opacity: 0.95, fog: false, depthWrite: false });
     const mesh = new THREE.Mesh(boxGeo(1, 1, 1), mat);
-    mesh.position.set((ax + e[0]) / 2, (ay + e[1]) / 2, (az + e[2]) / 2);
-    mesh.scale.set(0.03, 0.03, Math.hypot(e[0] - ax, e[1] - ay, e[2] - az));
-    mesh.lookAt(e[0], e[1], e[2]);
-    scene.add(mesh); tracers.push({ mesh, mat, life: 0.12 });
-    spawnSparks(e[0], e[1], e[2]);
+    mesh.visible = false; scene.add(mesh);
+    tracerPool.push({ mesh, mat, a: new THREE.Vector3(), e: new THREE.Vector3(), len: 0, t: 1, dur: 1, spark: false, on: false });
   }
 }
+let tracerNext = 0;
+function addTracer(a, ex, ey, ez, spark) {
+  ensureTracerPool();
+  const tr = tracerPool[tracerNext++ % tracerPool.length];
+  tr.a.copy(a); tr.e.set(ex, ey, ez);
+  tr.len = tr.a.distanceTo(tr.e); tr.t = 0; tr.dur = 0.04 + tr.len / 420; tr.spark = spark; tr.on = tr.len > 0.3;
+  tr.mesh.visible = tr.on;
+}
+const _td = new THREE.Vector3();
 function updateTracers(dt) {
-  for (let i = tracers.length - 1; i >= 0; i--) {
-    const t = tracers[i]; t.life -= dt;
-    if (t.life <= 0) { scene.remove(t.mesh); t.mat.dispose(); tracers.splice(i, 1); continue; }
-    t.mat.opacity = t.life / 0.12 * 0.95;
+  for (const tr of tracerPool) {
+    if (!tr.on) continue;
+    tr.t += dt / tr.dur;
+    if (tr.t >= 1) { tr.on = false; tr.mesh.visible = false; if (tr.spark) spawnSparks(tr.e.x, tr.e.y, tr.e.z); continue; }
+    const head = tr.len * tr.t, tail = Math.max(0, head - 7);   // a short streak that travels, not a full-length line
+    _td.copy(tr.e).sub(tr.a).normalize();
+    tr.mesh.position.copy(tr.a).addScaledVector(_td, (head + tail) / 2);
+    tr.mesh.scale.set(0.03, 0.03, Math.max(0.05, head - tail));
+    tr.mesh.lookAt(tr.e);
   }
+}
+// tracers of other people's shots (and wave raiders): leave from roughly their gun hand
+function spawnTracers(m) {
+  for (const e of m.e) {
+    const dx = e[0] - m.o[0], dy = e[1] - m.o[1], dz = e[2] - m.o[2], l = Math.hypot(dx, dy, dz) || 1;
+    _tmpA.set(m.o[0], m.o[1], m.o[2]);
+    if (!m.raw) {
+      const hl = Math.hypot(dx, dz) || 1;
+      _tmpA.x += -dz / hl * 0.28 + dx / l * 0.8; _tmpA.y += -0.3 + dy / l * 0.8; _tmpA.z += dx / hl * 0.28 + dz / l * 0.8;
+    }
+    addTracer(_tmpA, e[0], e[1], e[2], l < 215);
+  }
+}
+// the barrel tip of the held gun in world space (the viewmodel is drawn with its own camera, so go through screen space)
+const _mz = new THREE.Vector3(), _mz2 = new THREE.Vector3();
+function muzzleWorld(out, dir) {
+  if (viewMode === 0 && camera.fov > 40) {
+    const it = curItem();
+    const g = it.k === 'gun' ? itemMeshes.get('gun:' + it.g) : null;
+    if (g) {
+      vmScene.updateMatrixWorld(true);
+      g.userData.flash.getWorldPosition(_mz);
+      const depth = -_mz.z;
+      _mz2.copy(_mz).project(vmCamera);
+      _mz2.set(_mz2.x, _mz2.y, 0.5).unproject(camera).sub(camera.position).normalize();
+      return out.copy(camera.position).addScaledVector(_mz2, depth);
+    }
+  }
+  const hx = Math.cos(player.yaw) * 0.3, hz = -Math.sin(player.yaw) * 0.3;     // third person or zoomed: the hand
+  return out.set(player.pos.x + hx + dir.x * 0.8, player.pos.y + eyeH - 0.3 + dir.y * 0.8, player.pos.z + hz + dir.z * 0.8);
+}
+// how far a shot from the eye travels before it hits a block, a player or a raider (mirrors the server, minus trees)
+function shotDistance(eye, d, range) {
+  let t = range;
+  const hit = raycast(eye, d, range);
+  if (hit) t = Math.min(t, hit.t);
+  const sphere = (cx, cy, cz, r) => {
+    const fx = cx - eye.x, fy = cy - eye.y, fz = cz - eye.z, tt = fx * d.x + fy * d.y + fz * d.z;
+    if (tt < 0 || tt > t) return;
+    const p2 = fx * fx + fy * fy + fz * fz - tt * tt;
+    if (p2 <= r * r) t = Math.max(0, tt - Math.sqrt(r * r - p2));
+  };
+  for (const r of remotes.values()) {
+    const g = r.g.position;
+    sphere(g.x, g.y + 0.5, g.z, 0.5); sphere(g.x, g.y + 1.05, g.z, 0.5); sphere(g.x, g.y + 1.62, g.z, 0.3);
+  }
+  for (const w of wmobsC.values()) { const sc = WSTYLE[w.kind].scale, g = w.root.position; sphere(g.x, g.y + 0.5 * sc, g.z, 0.5 * sc); sphere(g.x, g.y + 1.1 * sc, g.z, 0.5 * sc); sphere(g.x, g.y + 1.62 * sc, g.z, 0.3 * sc); }
+  return t;
 }
 
 function breakBlock() {
@@ -964,6 +1022,102 @@ function updateArrows(dt) {
   }
 }
 
+/* ---------- wave raiders: zombies carrying weapons ---------- */
+const WKINDS = ['grunt', 'gunner', 'brute', 'warlord'];     // same order as waves.js
+const WSTYLE = {
+  grunt:   { label: 'Raider',  scale: 1,    weapon: 'sword' },
+  gunner:  { label: 'Gunner',  scale: 1,    weapon: 'pistol' },
+  brute:   { label: 'Brute',   scale: 1.35, weapon: 'axe' },
+  warlord: { label: 'Warlord', scale: 1.5,  weapon: 'rifle' },
+};
+const wmobsC = new Map(), wdying = [];
+let waveInfo = null;
+// weapons hang off the right hand; the zombie's arm points forward, so the weapon's long axis is the arm's -y
+function makeWeapon(kind) {
+  const g = new THREE.Group();
+  const bit = (w, h, d, c, x, y, z) => { const m = box(w, h, d, c, x, y, z); g.add(m); return m; };
+  if (kind === 'sword') { bit(0.07, 0.85, 0.05, 0xcfd6dc, 0, -1.05, 0); bit(0.26, 0.07, 0.08, 0x5a3b1c, 0, -0.66, 0); }
+  else if (kind === 'axe') { bit(0.07, 1.0, 0.07, 0x6b4a2a, 0, -0.95, 0); bit(0.1, 0.34, 0.42, 0x8b929a, 0, -1.3, -0.16); }
+  else { const gun = buildGun(kind); gun.rotation.x = -Math.PI / 2; gun.position.set(0, -0.62, 0); g.add(gun); }
+  return g;
+}
+function ensureWMob(id, kindIdx, x, y, z) {
+  let m = wmobsC.get(id);
+  if (m) return m;
+  const kind = WKINDS[kindIdx] || 'grunt', st = WSTYLE[kind];
+  const cr = createMob('zombie');
+  const root = new THREE.Group();
+  root.position.set(x, y, z);
+  cr.root.scale.setScalar(st.scale);
+  root.add(cr.root);
+  if (cr.joints.armR) cr.joints.armR.add(makeWeapon(st.weapon));
+  const label = makeLabel(st.label); label.position.y = 2.15 * st.scale + 0.35; root.add(label);
+  const bar = makeBar(2.0 * st.scale + 0.2);
+  root.add(bar.bg, bar.fg);
+  scene.add(root);
+  m = { id, kind, root, cr, body: cr.root, bar, tx: x, ty: y, tz: z, tyaw: 0, hp: 100, flags: 0, speed: 0, swingT: 0 };
+  wmobsC.set(id, m);
+  return m;
+}
+function removeWMob(id, withDeath) {
+  const m = wmobsC.get(id); if (!m) return;
+  wmobsC.delete(id);
+  if (withDeath) { m.bar.bg.visible = m.bar.fg.visible = false; wdying.push({ m, t: 0 }); }
+  else scene.remove(m.root);
+}
+function applyWMobSnapshot(list) {
+  const seen = new Set();
+  for (const [id, kindIdx, x, y, z, yaw, hpPct, flags] of list) {
+    seen.add(id);
+    const m = ensureWMob(id, kindIdx, x, y, z);
+    if (hpPct < m.hp) m.cr.hit();
+    if ((flags & 2) && !(m.flags & 2)) m.swingT = 0.35;
+    m.tx = x; m.ty = y; m.tz = z; m.tyaw = yaw; m.hp = hpPct; m.flags = flags;
+  }
+  for (const id of [...wmobsC.keys()]) if (!seen.has(id)) removeWMob(id);
+}
+function clearWMobs() { for (const id of [...wmobsC.keys()]) removeWMob(id); for (const e of wdying) scene.remove(e.m.root); wdying.length = 0; }
+function updateWMobs(dt) {
+  const a = 1 - Math.exp(-12 * dt);
+  for (const m of wmobsC.values()) {
+    const px = m.root.position.x, pz = m.root.position.z;
+    m.root.position.x += (m.tx - px) * a; m.root.position.y += (m.ty - m.root.position.y) * a; m.root.position.z += (m.tz - pz) * a;
+    let d = m.tyaw - m.body.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d));
+    m.body.rotation.y += d * a;
+    const sp = Math.hypot(m.root.position.x - px, m.root.position.z - pz) / Math.max(dt, 1e-3);
+    m.speed += (sp - m.speed) * Math.min(1, 8 * dt);
+    m.cr.animate(dt, { speed: m.speed });
+    const arm = m.cr.joints.armR;
+    if (arm) {
+      if (m.swingT > 0) { m.swingT -= dt; arm.rotation.x = 1.45 - 1.5 * Math.sin(Math.max(0, m.swingT) / 0.35 * Math.PI); }   // chop
+      else if (m.flags & 4) arm.rotation.x += 0.18;                                                                    // gun kick
+    }
+    const showBar = m.hp < 100;
+    m.bar.bg.visible = m.bar.fg.visible = showBar;
+    if (showBar) { m.bar.fg.scale.x = Math.max(0.01, 0.96 * m.hp / 100); m.bar.fg.material.color.setHex(m.hp < 35 ? 0xff5050 : 0x66ff66); }
+  }
+  for (let i = wdying.length - 1; i >= 0; i--) {
+    const e = wdying[i]; e.t += dt;
+    const p = Math.min(1, e.t / 0.3);
+    e.m.body.rotation.z = (Math.PI / 2) * (1 - (1 - p) * (1 - p));
+    e.m.cr.hurtT = 0.28; e.m.cr.animate(dt, { speed: 0 });
+    if (e.t > 0.9) { scene.remove(e.m.root); wdying.splice(i, 1); }
+  }
+}
+function pickWMob(maxDist) {
+  _eye.set(player.pos.x, player.pos.y + eyeH, player.pos.z);
+  viewDir(_dir);
+  let best = null, bestT = Infinity;
+  for (const m of wmobsC.values()) {
+    const sc = WSTYLE[m.kind].scale;
+    const cx = m.root.position.x - _eye.x, cy = m.root.position.y + 0.9 * sc - _eye.y, cz = m.root.position.z - _eye.z;
+    const t = cx * _dir.x + cy * _dir.y + cz * _dir.z;
+    if (t < 0 || t > maxDist + sc * 0.4) continue;
+    if (cx * cx + cy * cy + cz * cz - t * t <= (0.95 * sc) ** 2 && t < bestT) { bestT = t; best = m; }
+  }
+  return best ? { id: best.id, t: bestT } : null;
+}
+
 /* ---------- first-person hand + held item (drawn in its own pass) ---------- */
 const vm = new THREE.Group();
 vmScene.add(vm);
@@ -1021,8 +1175,10 @@ function buildGun(kind) {
     gunPart(g, 0.03, 0.03, 0.5, G_MID, 0, 0.0, -0.8); gunPart(g, 0.05, 0.12, 0.06, G_MID, 0, -0.1, -0.05);
     mz = -1.08;
   }
-  const flash = new THREE.Mesh(boxGeo(0.14, 0.14, 0.1), new THREE.MeshBasicMaterial({ color: 0xffe08a }));
-  flash.position.set(0, 0.01, mz - 0.05); flash.visible = false; g.add(flash);
+  const flash = new THREE.Group();                                   // a little star: three crossed slabs
+  const fm = new THREE.MeshBasicMaterial({ color: 0xffe08a });
+  for (const [w, h, d] of [[0.2, 0.05, 0.05], [0.05, 0.2, 0.05], [0.07, 0.07, 0.2]]) flash.add(new THREE.Mesh(boxGeo(w, h, d), fm));
+  flash.position.set(0, 0.01, mz - 0.06); flash.visible = false; g.add(flash);
   g.userData.flash = flash;
   return g;
 }
@@ -1092,7 +1248,10 @@ function updateViewmodel(dt, moving) {
     $('draw').firstElementChild.style.width = (drawProgress() * 100) + '%';
   } else if (it.k === 'gun') {
     vm.position.z += recoil * 0.07; vm.rotation.x += recoil * 0.12; vm.position.y += recoil * 0.01;
-    if (item && item.userData.flash) item.userData.flash.visible = muzzle > 0;
+    if (item && item.userData.flash) {
+      const f = item.userData.flash; f.visible = muzzle > 0;
+      if (f.visible) f.scale.setScalar(0.8 + Math.random() * 0.7);
+    }
   } else {
     vm.rotation.x = -s2 * 0.7; vm.position.y -= s2 * 0.06; vm.position.x -= s2 * 0.1;
   }
@@ -1151,10 +1310,14 @@ const net = {
           else { r.anchor = null; if (r.rope) r.rope.g.visible = false; }
           break;
         }
-        case 'arena': setArenaState(m.on, m.guns); break;
+        case 'arena': setArenaState(m.on, m.guns, m.zone); break;
         case 'ammo': gunAmmo = m.guns || {}; updateEquip(); break;
         case 'score': scoreList = m.list || []; updateScore(); break;
         case 'shot': spawnTracers(m); break;
+        case 'toast': toast(m.text, m.color); break;
+        case 'wmobs': applyWMobSnapshot(m.m); break;
+        case 'wdie': removeWMob(m.id, true); break;
+        case 'wave': waveInfo = m; updateWaveHud(); break;
         case 'mobs': applyMobSnapshot(m.m); break;
         case 'mobdie': removeMob(m.id, !m.gone); break;
         case 'arrow': spawnArrow(m); break;
@@ -1213,14 +1376,27 @@ function updateMats() {
   $('mats').innerHTML = MATS.filter(k => (inv[k] | 0) > 0 || k === 'wood')
     .map(k => `${ITEM_NAMES[k]} <b>${inv[k] | 0}</b>`).join('<br>') + ((inv.meat | 0) > 0 ? '<br><small>G to eat</small>' : '');
 }
-function setArenaState(on, guns) {
-  const was = arenaOn;
-  arenaOn = on; gunAmmo = guns || {};
-  $('arenahud').style.display = on ? 'block' : 'none';
-  if (on === was) { updateEquip(); return; }
+function setArenaState(on, guns, zone) {
+  const was = arenaOn, wasZone = zoneName;
+  arenaOn = on; zoneName = on ? zone : null; gunAmmo = guns || {};
+  $('arenahud').style.display = zoneName === 'ffa' ? 'block' : 'none';
+  $('wavehud').style.display = zoneName === 'wave' ? 'block' : 'none';
+  if (on === was && zoneName === wasZone) { updateEquip(); return; }
   buildHotbar();
-  if (on) { toast('ENTERED THE ARENA - free for all! Guns on slots 3-6', '#ffd23a'); selectSlot(2); }
-  else { scoreList = []; updateScore(); toast('Left the arena', '#9aa'); selectSlot(selected >= 2 && selected < 6 ? 0 : selected); }
+  if (wasZone === 'wave' && zoneName !== 'wave') { clearWMobs(); waveInfo = null; }
+  if (on) {
+    toast(zoneName === 'wave' ? 'WAVE FORTRESS - survive the raiders with your team! Guns on slots 3-6' : 'ENTERED THE ARENA - free for all! Guns on slots 3-6', '#ffd23a');
+    if (!was) selectSlot(2); else { updateEquip(); refreshHeld(); }
+  } else { scoreList = []; updateScore(); toast('Left the arena', '#9aa'); selectSlot(selected >= 2 && selected < 6 ? 0 : selected); }
+}
+function updateWaveHud() {
+  const w = waveInfo; if (!w) return;
+  const mine = w.list.find(r => r[0] === myName);
+  const lives = mine ? mine[2] : 0;
+  const status = w.phase === 'break' ? (w.n === 1 ? `Raiders arrive in ${w.cd}s` : `Wave ${w.n} in ${w.cd}s`) : `Raiders left: <b>${w.left}</b>`;
+  $('wavehud').innerHTML = `<div class="t">WAVE ${w.n}</div><div>${status}</div>` +
+    `<div class="lives">${'&#9829;'.repeat(Math.max(0, lives))}<span>${'&#9829;'.repeat(Math.max(0, 3 - lives))}</span></div>` +
+    w.list.map(r => `<div${r[0] === myName ? ' class="me"' : ''}>${r[0]} &nbsp;<b>${r[1]}</b> kills</div>`).join('');
 }
 function updateScore() {
   $('score').innerHTML = scoreList.map((r, i) => `<div${r[0] === myName ? ' class="me"' : ''}>${i + 1}. ${r[0]} &nbsp;<b>${r[1]}</b> / ${r[2]}</div>`).join('');
@@ -1350,13 +1526,40 @@ function closePalette(relock) {
   if (relock) renderer.domElement.requestPointerLock(); else showHelp(true);
 }
 
+// travel menu: teleport to the arenas without typing commands
+let menuOpen = false;
+const compassTo = (cx, cz) => {
+  const dx = cx + 0.5 - player.pos.x, dz = cz + 0.5 - player.pos.z;
+  return `${Math.round(Math.hypot(dx, dz))}m ${COMPASS[((Math.round(Math.atan2(dx, -dz) / (Math.PI / 4)) % 8) + 8) % 8]}`;
+};
+function buildMenu() {
+  const a = arenas();
+  $('menubox').innerHTML = `<h2>Travel</h2><div class="have">Pick a destination. Same as the chat commands /arena /waves /spawn. Press M to close.</div>
+    <button class="dest" data-w="ffa"><b>Free-for-all Arena</b><small>Every player for themselves. Guns, kill / death scoreboard. &nbsp;(${compassTo(a.ffa.cx, a.ffa.cz)})</small></button>
+    <button class="dest" data-w="wave"><b>Wave Arena</b><small>Armed raiders pour out of four doors. Team up and survive, 3 lives each. &nbsp;(${compassTo(a.wave.cx, a.wave.cz)})</small></button>
+    <button class="dest" data-w="spawn"><b>Back to Spawn</b><small>The overworld spawn point.</small></button>`;
+  for (const b of $('menubox').querySelectorAll('button[data-w]')) {
+    b.onclick = () => { net.send({ t: 'goto', where: b.dataset.w }); closeMenu(true); };
+  }
+}
+function openMenu() {
+  menuOpen = true; buildMenu();
+  $('menu').style.display = 'flex'; showHelp(false);
+  keys.clear(); mouseDown = rightDown = false; if (drawing) cancelDraw();
+  document.exitPointerLock();
+}
+function closeMenu(relock) {
+  menuOpen = false; $('menu').style.display = 'none';
+  if (relock) renderer.domElement.requestPointerLock(); else showHelp(true);
+}
+
 function showHelp(show) { $('help').style.display = show ? 'flex' : 'none'; }
 $('help').addEventListener('click', () => renderer.domElement.requestPointerLock());
-renderer.domElement.addEventListener('click', () => { if (!locked && player.ready && !craftOpen && !paletteOpen) renderer.domElement.requestPointerLock(); });
+renderer.domElement.addEventListener('click', () => { if (!locked && player.ready && !craftOpen && !paletteOpen && !menuOpen) renderer.domElement.requestPointerLock(); });
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === renderer.domElement;
   if (!locked) { mouseDown = rightDown = false; if (drawing) cancelDraw(); }
-  if (started) showHelp(!locked && !chatOpen && !craftOpen && !paletteOpen);
+  if (started) showHelp(!locked && !chatOpen && !craftOpen && !paletteOpen && !menuOpen);
 });
 
 /* ---------- input ---------- */
@@ -1370,19 +1573,32 @@ document.addEventListener('mousemove', e => {
 function attack() {
   if (swingCd > 0) return;
   swingCd = 0.35; swing = 1;
-  const m = pickMob(3.8), pl = pickPlayer(3.8);
-  if (pl && (!m || pl.t < lastPickT)) net.send({ t: 'pmelee', id: pl.id });
-  else if (m) net.send({ t: 'melee', id: m.id });
+  const m = pickMob(3.8), mt = lastPickT, pl = zoneName === 'wave' ? null : pickPlayer(3.8), wm = pickWMob(3.8);
+  const best = Math.min(m ? mt : Infinity, pl ? pl.t : Infinity, wm ? wm.t : Infinity);
+  if (wm && wm.t === best) net.send({ t: 'wmelee', id: wm.id });
+  else if (pl && pl.t === best) net.send({ t: 'pmelee', id: pl.id });
+  else if (m && mt === best) net.send({ t: 'melee', id: m.id });
   else breakBlock();
 }
+const _mzo = new THREE.Vector3();
 function fireGun() {
   const it = curItem();
   if (it.k !== 'gun' || gunCd > 0) return;
   const g = GUNS[it.g];
   if ((gunAmmo[it.g] | 0) <= 0) { gunCd = 0.3; toast('Out of ammo', '#ff8a8a'); return; }
-  gunCd = g.cd / 1000; recoil = g.kick; muzzle = 0.06;
+  gunCd = g.cd / 1000;
   viewDir(_dir);
   net.send({ t: 'gun', g: it.g, dx: _dir.x, dy: _dir.y, dz: _dir.z });
+  // draw the shot right now (the server does not echo it back to us): from the gun's muzzle to where the eye ray lands
+  _eye.set(player.pos.x, player.pos.y + eyeH, player.pos.z);
+  muzzleWorld(_mzo, _dir);
+  const sx = _dir.x, sy = _dir.y, sz = _dir.z, pd = new THREE.Vector3();
+  for (let i = 0; i < g.pellets; i++) {
+    pd.set(sx + (Math.random() - 0.5) * 2 * g.spread, sy + (Math.random() - 0.5) * 2 * g.spread, sz + (Math.random() - 0.5) * 2 * g.spread).normalize();
+    const t = shotDistance(_eye, pd, g.range);
+    addTracer(_mzo, _eye.x + pd.x * t, _eye.y + pd.y * t, _eye.z + pd.z * t, t < g.range - 1);
+  }
+  recoil = g.kick; muzzle = 0.09;
   gunAmmo[it.g]--; updateEquip();
 }
 function startDraw() {
@@ -1448,6 +1664,11 @@ document.addEventListener('keydown', e => {
     else if (e.code === 'Escape') closeCraft(false);
     return;
   }
+  if (menuOpen) {
+    if (e.code === 'KeyM') { e.preventDefault(); closeMenu(true); }
+    else if (e.code === 'Escape') closeMenu(false);
+    return;
+  }
   if (paletteOpen) {
     if (e.code === 'KeyQ') { e.preventDefault(); closePalette(true); }
     else if (e.code === 'Escape') closePalette(false);
@@ -1455,6 +1676,7 @@ document.addEventListener('keydown', e => {
   }
   if (e.code === 'KeyE' && player.ready && !e.repeat) { e.preventDefault(); openCraft(); return; }
   if (e.code === 'KeyQ' && player.ready && !e.repeat) { e.preventDefault(); openPalette(); return; }
+  if (e.code === 'KeyM' && player.ready && !e.repeat) { e.preventDefault(); openMenu(); return; }
   if (e.code === 'Enter' && player.ready) { e.preventDefault(); openChat(); return; }
   if (e.code === 'KeyF' && !e.repeat) { fireGrapple(); return; }
   if (e.code === 'KeyV' && !e.repeat) { player.fly = !player.fly; if (player.fly) { releaseGrapple(0); slide.t = 0; } return; }
@@ -1499,6 +1721,10 @@ function startGame(token) {
   buildHotbar();
   net.onInit = () => {
     selfAvatar = makeAvatar(myName); selfAvatar.g.visible = false;
+    ensureTracerPool();
+    for (const k of GUN_SLOTS) heldGun(k);                  // build every gun now and compile its shaders, so the first shot does not stutter
+    vmCamera.updateMatrixWorld();
+    renderer.compile(vmScene, vmCamera); renderer.compile(scene, camera);
     player.pos.set(spawn.x, 60, spawn.z);
     lastPcx = null;
     onInvChanged(); updateHp(); refreshHeld();
@@ -1517,7 +1743,7 @@ function startGame(token) {
 })();
 
 // handles for automated tests / screenshots
-window.__cl = { player, camera, mobsC, remotes, world, grapple, slide, get daylight() { return daylight; }, set phase(v) { phase0 = v; tInit = performance.now(); }, HOTBAR, selectSlot, setBlock, getBlock };
+window.__cl = { player, camera, mobsC, remotes, world, grapple, slide, net, tracerPool, wmobsC, get zone() { return zoneName; }, ensureWMob, get waveInfo() { return waveInfo; }, get daylight() { return daylight; }, set phase(v) { phase0 = v; tInit = performance.now(); }, HOTBAR, selectSlot, setBlock, getBlock };
 
 /* ---------- camera: first person, or orbiting behind / in front of the player ---------- */
 const _back = new THREE.Vector3();
@@ -1540,10 +1766,10 @@ function placeCamera() {
 }
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 function arenaHint() {
-  const a = arena(), dx = a.cx + 0.5 - player.pos.x, dz = a.cz + 0.5 - player.pos.z;
-  if (inArena(player.pos.x, player.pos.z)) return 'you are inside';
-  const ang = Math.atan2(dx, -dz);                           // north is -z
-  return `${Math.round(Math.hypot(dx, dz))}m ${COMPASS[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8]}`;
+  const z = zoneAt(player.pos.x, player.pos.z);
+  if (z) return z === 'ffa' ? 'FFA arena: you are inside' : 'Wave fortress: you are inside';
+  const A = arenas();
+  return `FFA ${compassTo(A.ffa.cx, A.ffa.cz)} &middot; Waves ${compassTo(A.wave.cx, A.wave.cz)} &middot; M menu`;
 }
 
 /* ---------- main loop ---------- */
@@ -1584,6 +1810,7 @@ function loop(now) {
     }
   }
   updateMobs(dt);
+  updateWMobs(dt);
   updateArrows(dt);
   updateParticles(dt);
   updateViewmodel(dt, locked && player.onGround && (keys.has('KeyW') || keys.has('KeyA') || keys.has('KeyS') || keys.has('KeyD')));
@@ -1603,7 +1830,7 @@ function loop(now) {
   $('info').innerHTML =
     `FPS ${fps}<br>XYZ ${player.pos.x.toFixed(1)} ${player.pos.y.toFixed(1)} ${player.pos.z.toFixed(1)}<br>` +
     `${BIOME_NAME[biomeAt(Math.floor(player.pos.x), Math.floor(player.pos.z))]} &middot; ${clock}<br>` +
-    `Arena: ${arenaHint()}<br>` +
+    `${arenaHint()}<br>` +
     `Players online: ${remotes.size + 1}${player.fly ? '<br>FLY MODE' : ''}${grapple.active ? '<br>GRAPPLING' : ''}${player.ready ? '' : '<br>Generating world...'}`;
   renderer.clear();
   renderer.render(scene, camera);

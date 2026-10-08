@@ -41,49 +41,66 @@ export function rawHeight(x, z) {
   return Math.min(52, Math.floor(14 + n * 38 + m * 6));
 }
 
-/* ---------- the arena: a walled free-for-all pit, placed deterministically from the seed ---------- */
-export const ARENA_HALF = 24;   // footprint is 49 x 49 blocks
-let _arena = null, _arenaSeed = null;
-export function arena() {
-  if (_arena && _arenaSeed === SEED) return _arena;
-  let pick = null;
-  const ok = (cx, cz) => {
-    let lo = 99, hi = 0, sum = 0;
-    for (const dx of [-ARENA_HALF, 0, ARENA_HALF]) for (const dz of [-ARENA_HALF, 0, ARENA_HALF]) {
-      const h = rawHeight(cx + dx, cz + dz);
-      lo = Math.min(lo, h); hi = Math.max(hi, h); sum += h;
+/* ---------- arenas: two walled pits ('ffa' free-for-all, 'wave' survival), placed deterministically from the seed ---------- */
+export const ARENA_KINDS = ['ffa', 'wave'];
+const ARENA_DEF = { ffa: { half: 24, start: [120, 40] }, wave: { half: 28, start: [-130, 70] } };
+const SKIRT = 14;       // the land eases into the arena floor over this many blocks, so there are no cliffs around it
+let _arenas = null, _arenaSeed = null;
+export function arenas() {
+  if (_arenas && _arenaSeed === SEED) return _arenas;
+  const out = {};
+  for (const kind of ARENA_KINDS) {
+    const { half, start } = ARENA_DEF[kind];
+    const ok = (cx, cz) => {
+      for (const o of Object.values(out)) if (Math.max(Math.abs(cx - o.cx), Math.abs(cz - o.cz)) < half + o.half + 2 * SKIRT + 8) return 0;
+      let lo = 99, hi = 0, sum = 0;
+      for (const dx of [-half, 0, half]) for (const dz of [-half, 0, half]) {
+        const h = rawHeight(cx + dx, cz + dz);
+        lo = Math.min(lo, h); hi = Math.max(hi, h); sum += h;
+      }
+      return lo >= SEA + 2 && hi <= 44 && hi - lo <= 12 ? Math.round(sum / 9) : 0;
+    };
+    let pick = null;
+    search:
+    for (let r = 0; r <= 300; r += 8) {
+      const steps = r === 0 ? 1 : Math.ceil(r / 4);
+      for (let k = 0; k < steps; k++) {
+        const ang = (k / steps) * Math.PI * 2;
+        const cx = Math.round(start[0] + Math.cos(ang) * r), cz = Math.round(start[1] + Math.sin(ang) * r);
+        const f = ok(cx, cz);
+        if (f) { pick = { cx, cz, floor: Math.max(SEA + 3, Math.min(40, f)) }; break search; }
+      }
     }
-    return lo >= SEA + 2 && hi <= 44 && hi - lo <= 12 ? Math.round(sum / 9) : 0;
-  };
-  search:
-  for (let r = 0; r <= 240; r += 8) {
-    const steps = r === 0 ? 1 : Math.ceil(r / 4);
-    for (let k = 0; k < steps; k++) {
-      const a = (k / steps) * Math.PI * 2;
-      const cx = Math.round(120 + Math.cos(a) * r), cz = Math.round(40 + Math.sin(a) * r);
-      const f = ok(cx, cz);
-      if (f) { pick = { cx, cz, floor: Math.max(SEA + 3, Math.min(40, f)) }; break search; }
-    }
+    if (!pick) pick = { cx: start[0], cz: start[1], floor: SEA + 3 };
+    out[kind] = { kind, half, ...pick };
   }
-  if (!pick) pick = { cx: 120, cz: 40, floor: SEA + 3 };
-  _arena = pick; _arenaSeed = SEED;
-  return pick;
+  _arenas = out; _arenaSeed = SEED;
+  return out;
 }
-// m widens the zone (used to keep mobs and trees away)
-export function inArena(x, z, m = 0) {
-  const a = arena();
-  return Math.abs(Math.floor(x) - a.cx) <= ARENA_HALF + m && Math.abs(Math.floor(z) - a.cz) <= ARENA_HALF + m;
+export const arena = kind => arenas()[kind || 'ffa'];
+// which arena footprint (if any) contains the column; m widens the zone (keeps mobs and trees away)
+export function zoneAt(x, z, m = 0) {
+  const A = arenas(), fx = Math.floor(x), fz = Math.floor(z);
+  for (const k of ARENA_KINDS) {
+    const a = A[k];
+    if (Math.abs(fx - a.cx) <= a.half + m && Math.abs(fz - a.cz) <= a.half + m) return k;
+  }
+  return null;
 }
-export function heightAt(x, z) { return inArena(x, z) ? arena().floor : rawHeight(x, z); }
-// block at a world position inside the arena footprint, or -1 outside it. The floor is y = arena().floor.
-export function arenaBlockAt(x, y, z) {
-  const a = arena();
-  const dx = x - a.cx, dz = z - a.cz, ax = Math.abs(dx), az = Math.abs(dz);
-  if (ax > ARENA_HALF || az > ARENA_HALF) return -1;
-  const F = a.floor;
-  if (y < F) return B.STONE;
-  if (y === F) return (((x >> 2) + (z >> 2)) & 1) ? B.STONE : B.COBBLE;
-  if (y > F + 40) return -1;
+export const inArena = (x, z, m = 0) => zoneAt(x, z, m) !== null;
+// arena blocks can never be broken or built on, by a player or by an explosion: anything that edits the world must ask this first
+export const isProtected = (x, y, z) => inArena(x, z);
+export function heightAt(x, z) {
+  const A = arenas(), fx = Math.floor(x), fz = Math.floor(z);
+  for (const k of ARENA_KINDS) {
+    const a = A[k];
+    const d = Math.max(Math.abs(fx - a.cx), Math.abs(fz - a.cz)) - a.half;
+    if (d <= 0) return a.floor;
+    if (d < SKIRT) return Math.round(a.floor + (rawHeight(x, z) - a.floor) * smooth(d / SKIRT));
+  }
+  return rawHeight(x, z);
+}
+function ffaBlock(x, y, z, ax, az, F) {
   const h = y - F;
   if (ax >= 23 || az >= 23) {                                   // outer wall, 2 thick, with a gate in the middle of each side
     if ((az >= 23 && ax <= 2) || (ax >= 23 && az <= 2)) return h <= 5 ? 0 : h <= 9 ? B.PLANKS : 0;
@@ -104,11 +121,56 @@ export function arenaBlockAt(x, y, z) {
   }
   return 0;
 }
-export function arenaSpawns() {
-  const a = arena(), out = [];
+// the wave fortress: four doors the raiders pour out of, a stepped keep with a parapet to hold
+function waveBlock(x, y, z, ax, az, F) {
+  const h = y - F;
+  if (ax >= 27 || az >= 27) {
+    const doorZ = az >= 27 && ax <= 2, doorX = ax >= 27 && az <= 2;
+    if (doorZ || doorX) return h <= 4 ? 0 : h <= 10 ? B.PLANKS : 0;                      // 5 wide, 4 tall, lintel above
+    if (((az >= 27 && ax === 3) || (ax >= 27 && az === 3)) && h <= 4) return B.LOG;       // door frames
+    if (h <= 10) return h === 10 ? B.STONE : B.COBBLE;
+    if (h === 11 && ((x + z) & 1) === 0) return B.COBBLE;
+    return 0;
+  }
+  const m = Math.max(ax, az);
+  if ((m <= 9 && h <= 1) || (m <= 7 && h <= 2) || (m <= 5 && h <= 3)) return B.PLANKS;   // stepped keep
+  if (m === 5 && h === 4 && ax > 1 && az > 1) return B.COBBLE;                            // parapet with a gap on each axis
+  if (ax >= 14 && ax <= 15 && az >= 14 && az <= 15 && h <= 7) return B.LOG;              // pillars
+  if (((az === 11 && ax >= 16 && ax <= 20) || (ax === 11 && az >= 16 && az <= 20)) && h <= 2) return B.COBBLE;   // cover
+  if (ax === 25 && az === 25 && h <= 18) return B.LOG;                                    // flag poles
+  return 0;
+}
+// block at a world position inside an arena footprint, or -1 outside. The floor is y = floor.
+export function arenaBlockAt(x, y, z) {
+  const k = zoneAt(x, z);
+  if (!k) return -1;
+  const a = arenas()[k], F = a.floor;
+  if (y < F) return B.STONE;
+  if (y === F) {
+    const ax = Math.abs(x - a.cx), az = Math.abs(z - a.cz);
+    return k === 'ffa' ? (((x >> 2) + (z >> 2)) & 1 ? B.STONE : B.COBBLE) : ((Math.max(ax, az) >> 2) & 1 ? B.STONE : B.GRAVEL);
+  }
+  if (y > F + 40) return -1;
+  const ax = Math.abs(x - a.cx), az = Math.abs(z - a.cz);
+  return k === 'ffa' ? ffaBlock(x, y, z, ax, az, F) : waveBlock(x, y, z, ax, az, F);
+}
+export function arenaSpawns(kind = 'ffa') {
+  const a = arena(kind), out = [];
+  if (kind === 'wave') {
+    for (const [dx, dz] of [[2, 2], [-2, 2], [2, -2], [-2, -2]]) out.push({ x: a.cx + dx + 0.5, y: a.floor + 4, z: a.cz + dz + 0.5 });
+    return out;
+  }
   for (const [dx, dz] of [[0, 18], [0, -18], [18, 0], [-18, 0], [15, 15], [-15, 15], [15, -15], [-15, -15]])
     out.push({ x: a.cx + dx + 0.5, y: a.floor + 1, z: a.cz + dz + 0.5 });
   return out;
+}
+// where raiders walk out: just inside each door of the wave fortress, with the direction they face
+export function waveDoors() {
+  const a = arena('wave'), y = a.floor + 1, o = 28.5;
+  return [
+    { x: a.cx + 0.5, z: a.cz + 0.5 + o, y }, { x: a.cx + 0.5, z: a.cz + 0.5 - o, y },
+    { x: a.cx + 0.5 + o, z: a.cz + 0.5, y }, { x: a.cx + 0.5 - o, z: a.cz + 0.5, y },
+  ];
 }
 
 /* ---------- biomes ---------- */
@@ -136,7 +198,7 @@ export function surfaceAt(x, z, h) {
 
 /* ---------- surface features: 1 oak, 2 cactus, 3 spruce ---------- */
 export function featureAt(x, z, h) {
-  if (inArena(x, z)) return 0;
+  if (inArena(x, z, 5)) return 0;
   if (h <= SEA + 2 || h >= 44) return 0;
   const bio = biomeAt(x, z);
   const r = hash2(x, z, SEED + 7);
@@ -192,7 +254,7 @@ export function spawnPoint() {
       for (let dx = -r; dx <= r; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
         const h = heightAt(dx, dz);
-        if (h >= SEA + 2 && h < 40 && !inArena(dx, dz, 6) && !treeAt(dx, dz, h) && openGround(dx, dz)) return { x: dx + 0.5, z: dz + 0.5 };
+        if (h >= SEA + 2 && h < 40 && !inArena(dx, dz, SKIRT + 6) && !treeAt(dx, dz, h) && openGround(dx, dz)) return { x: dx + 0.5, z: dz + 0.5 };
       }
     }
   }

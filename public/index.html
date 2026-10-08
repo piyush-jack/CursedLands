@@ -48,6 +48,18 @@
   #arenahud{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:none;text-align:center;font-size:12px;line-height:1.5;text-shadow:0 1px 2px #000;background:#0007;border:1px solid #ffd23a66;border-radius:6px;padding:6px 16px;min-width:170px}
   #arenahud .t{color:#ffd23a;letter-spacing:2px;font-weight:bold}
   #score .me{color:#7be0ff}
+  #wavehud{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:none;text-align:center;font-size:12px;line-height:1.5;text-shadow:0 1px 2px #000;background:#0007;border:1px solid #ff8a5a88;border-radius:6px;padding:6px 16px;min-width:190px}
+  #wavehud .t{color:#ff8a5a;letter-spacing:2px;font-weight:bold;font-size:15px}
+  #wavehud .lives{color:#ff5a6a;font-size:16px;letter-spacing:3px}#wavehud .lives span{color:#444}
+  #wavehud .me{color:#7be0ff}
+  #menu{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000b;z-index:5}
+  #menubox{width:480px;max-width:94vw;background:#141a22;border:1px solid #3a2f55;border-radius:10px;padding:18px}
+  #menubox h2{margin:0 0 4px;color:#c9a7ff}
+  #menubox .have{font-size:12px;color:#9aa;margin-bottom:12px}
+  .dest{display:block;width:100%;text-align:left;margin:8px 0;padding:12px 14px;background:#0b0f14;border:2px solid #2a3340;border-radius:8px;color:#e8e8e8;font:inherit;cursor:pointer}
+  .dest:hover{border-color:#7b4bd6}
+  .dest b{display:block;font-size:15px;margin-bottom:3px}
+  .dest small{color:#9aa}
   #scope{position:fixed;inset:0;pointer-events:none;display:none;z-index:2;background:radial-gradient(circle at 50% 50%,transparent 0,transparent 26vmin,#000 27vmin)}
   #scope:before,#scope:after{content:"";position:absolute;background:#000c}
   #scope:before{left:50%;top:0;bottom:0;width:1px}
@@ -91,6 +103,7 @@
   <div id="cross"></div>
   <div id="draw"><i></i></div>
   <div id="info"></div>
+  <div id="wavehud"></div>
   <div id="arenahud"><div class="t">ARENA &middot; FREE FOR ALL</div><div id="score"></div></div>
   <div id="mats"></div>
   <div id="toast"></div>
@@ -101,6 +114,7 @@
 <input id="chatin" maxlength="200" placeholder="Say something... (Enter to send, Esc to cancel)">
 <div id="craft"><div id="craftbox"></div></div>
 <div id="palette"><div id="palbox"></div></div>
+<div id="menu"><div id="menubox"></div></div>
 <div id="help">
   <div>
     <h2>Paused</h2>
@@ -111,7 +125,8 @@
       1 sword &nbsp; 2 bow &nbsp; 3-9 blocks &nbsp; wheel cycles<br>
       Left click: swing / mine &nbsp; Right click: place block &nbsp; Bow: hold left click, release to shoot<br>
       Headshots on mobs and players hit weak points for big damage. Swords and arrows hurt other players.<br>
-      <b>The Arena</b> (see the Arena distance top-left, or type /arena): free for all. Guns appear on slots 3-6, right click zooms the sniper.<br>
+      <b>M travel menu</b> (or type /arena /waves /spawn). <b>Arena</b>: free for all with guns on slots 3-6, right click zooms the sniper.<br>
+      <b>Wave Arena</b>: raiders with weapons pour out of the four doors. Team up, hold the keep, you have 3 lives.<br>
       Q block palette &nbsp; E crafting &nbsp; R switch arrow &nbsp; G eat raw meat &nbsp; Enter chat<br>
       Zombies and spiders roam at night. Dig for coal, iron and diamond.
     </div>

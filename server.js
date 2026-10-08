@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const createMobs = require('./mobs.js');
+const createWaves = require('./waves.js');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -267,7 +268,10 @@ const GUNS = {
   shotgun: { name: 'Shotgun', dmg: 3.5, cd: 850,  pellets: 8, spread: 0.07,  range: 28,  ammo: 32,  head: 1.5 },
   sniper:  { name: 'Sniper',  dmg: 15,  cd: 1500, pellets: 1, spread: 0,     range: 220, ammo: 16,  head: 2 },
 };
-const freshGuns = () => Object.fromEntries(Object.entries(GUNS).map(([k, g]) => [k, g.ammo]));
+const freshGuns = (mult = 1) => Object.fromEntries(Object.entries(GUNS).map(([k, g]) => [k, Math.round(g.ammo * mult)]));
+const WAVE_LIVES = 3;
+const WAVE_GUN_MULT = 2;   // raiders are tanky, so guns hit them twice as hard
+let waves = null;
 const arenaStats = new Map();   // lowercase name -> { k, d } (kept until the server restarts)
 const statOf = p => { const k = p.name.toLowerCase(); let s = arenaStats.get(k); if (!s) { s = { k: 0, d: 0 }; arenaStats.set(k, s); } return s; };
 
@@ -335,9 +339,9 @@ function hurtPlayer(p, dmg, src) {
   return false;
 }
 function pickArenaSpawn(except) {
-  const others = [...players.values()].filter(q => q !== except && q.inArena);
+  const others = [...players.values()].filter(q => q !== except && q.zone === 'ffa');
   let best = null, bestD = -1;
-  for (const sp of T.arenaSpawns()) {
+  for (const sp of T.arenaSpawns('ffa')) {
     let d = 1e9;
     for (const q of others) d = Math.min(d, Math.hypot(q.x - sp.x, q.z - sp.z));
     d += Math.random() * 4;
@@ -345,26 +349,39 @@ function pickArenaSpawn(except) {
   }
   return best;
 }
-function setArena(p, on) {
-  p.inArena = on;
-  p.guns = on ? freshGuns() : null;
-  send(p.ws, { t: 'arena', on, guns: p.guns });
-  if (on) broadcast({ t: 'chat', name: '*', text: `${p.name} entered the arena` });
+const pickWaveSpawn = () => { const l = T.arenaSpawns('wave'); return l[Math.floor(Math.random() * l.length)]; };
+const ZONE_NAME = { ffa: 'the arena', wave: 'the wave fortress' };
+// zone is null (open world), 'ffa' or 'wave'; both arenas hand out guns
+function setZone(p, zone) {
+  p.zone = zone;
+  p.guns = zone ? freshGuns(zone === 'wave' ? 1.5 : 1) : null;
+  if (zone === 'wave') { p.lives = WAVE_LIVES; p.wkills = 0; }
+  send(p.ws, { t: 'arena', on: !!zone, zone, guns: p.guns });
+  if (zone) broadcast({ t: 'chat', name: '*', text: `${p.name} entered ${ZONE_NAME[zone]}` });
+}
+function teleport(p, where) {
+  const now = Date.now();
+  let sp, msg;
+  if (where === 'ffa') { sp = pickArenaSpawn(p); msg = 'Teleported to the arena'; }
+  else if (where === 'wave') { sp = pickWaveSpawn(); msg = 'Teleported to the wave fortress'; }
+  else { sp = { x: SPAWN.x, y: 60, z: SPAWN.z }; msg = 'Teleported to spawn'; }
+  p.x = sp.x; p.y = sp.y; p.z = sp.z; p.hasPos = false; p.invuln = now + 2000;
+  send(p.ws, { t: 'respawn', x: sp.x, z: sp.z, msg });
 }
 function killPlayer(p, src) {
   const now = Date.now();
   const k = src.player && src.player !== p ? src.player : null;
-  const wasArena = p.inArena;
+  const zone = p.zone;
   p.hp = p.maxHp;
   p.hasPos = false;
-  p.invuln = now + (wasArena ? 3000 : 4000);
+  p.invuln = now + (zone ? 3000 : 4000);
   const how = k ? `${k.name} killed ${p.name}${src.weapon ? ' with ' + src.weapon : ''}` : `${p.name} was slain by ${src.label || 'something'}`;
   broadcast({ t: 'chat', name: '*', text: how });
-  if (wasArena) {
+  if (zone === 'ffa') {
     statOf(p).d++;
     if (k) {
       statOf(k).k++;
-      if (k.inArena) {                                     // reward: heal and top up ammo
+      if (k.zone === 'ffa') {                              // reward: heal and top up ammo
         k.hp = Math.min(k.maxHp, k.hp + 6); sendHp(k);
         for (const [g, def] of Object.entries(GUNS)) k.guns[g] = Math.min(def.ammo, (k.guns[g] | 0) + Math.ceil(def.ammo * 0.25));
         send(k.ws, { t: 'ammo', guns: k.guns });
@@ -374,7 +391,21 @@ function killPlayer(p, src) {
     p.x = sp.x; p.y = sp.y; p.z = sp.z;
     p.guns = freshGuns();
     send(p.ws, { t: 'respawn', x: sp.x, z: sp.z, msg: 'Eliminated. Back into the pit...' });
-    send(p.ws, { t: 'arena', on: true, guns: p.guns });
+    send(p.ws, { t: 'arena', on: true, zone, guns: p.guns });
+  } else if (zone === 'wave') {
+    p.lives--;
+    if (p.lives > 0) {
+      const sp = pickWaveSpawn();
+      p.x = sp.x; p.y = sp.y; p.z = sp.z;
+      p.guns = freshGuns(1.5);
+      send(p.ws, { t: 'respawn', x: sp.x, z: sp.z, msg: `Down! ${p.lives} ${p.lives === 1 ? 'life' : 'lives'} left` });
+      send(p.ws, { t: 'arena', on: true, zone, guns: p.guns });
+    } else {
+      p.zone = null; p.guns = null;
+      p.x = SPAWN.x; p.y = 60; p.z = SPAWN.z;
+      send(p.ws, { t: 'arena', on: false, zone: null, guns: null });
+      send(p.ws, { t: 'respawn', x: SPAWN.x, z: SPAWN.z, msg: `Out of lives. You survived to wave ${waves.W.wave}, with ${p.wkills | 0} kills` });
+    }
   } else {
     p.x = SPAWN.x; p.y = 60; p.z = SPAWN.z;
     send(p.ws, { t: 'respawn', x: SPAWN.x, z: SPAWN.z, msg: 'You were slain. Respawning...' });
@@ -405,7 +436,8 @@ function playerSpheres(q) {
 }
 function fireGun(me, gd, key, dx, dy, dz) {
   const ox = me.x, oy = me.y + (me.sl ? 0.85 : 1.6), oz = me.z;
-  const targets = [...players.values()].filter(q => q !== me && q.inArena && q.hasPos);
+  const wave = me.zone === 'wave';
+  const targets = wave ? [] : [...players.values()].filter(q => q !== me && q.zone === 'ffa' && q.hasPos);
   const dmgBy = new Map(), ends = [];
   for (let i = 0; i < gd.pellets; i++) {
     let px = dx + (Math.random() - 0.5) * 2 * gd.spread, py = dy + (Math.random() - 0.5) * 2 * gd.spread, pz = dz + (Math.random() - 0.5) * 2 * gd.spread;
@@ -419,17 +451,21 @@ function fireGun(me, gd, key, dx, dy, dz) {
         if (t !== null && t < L && (!best || t < best.t)) best = { t, q, head };
       }
     }
+    if (wave) {                                            // raiders instead of players
+      const hit = waves.rayTest(ox, oy, oz, px, py, pz, L);
+      if (hit) best = { t: hit.t, q: hit.m, head: hit.head };
+    }
     const te = best ? best.t : L;
     ends.push([+(ox + px * te).toFixed(2), +(oy + py * te).toFixed(2), +(oz + pz * te).toFixed(2)]);
     if (best) {
       const acc = dmgBy.get(best.q) || { dmg: 0, head: false };
-      acc.dmg += gd.dmg * (best.head ? gd.head : 1); acc.head = acc.head || best.head;
+      acc.dmg += gd.dmg * (wave ? WAVE_GUN_MULT : 1) * (best.head ? gd.head : 1); acc.head = acc.head || best.head;
       dmgBy.set(best.q, acc);
     }
   }
-  broadcast({ t: 'shot', g: key, o: [+ox.toFixed(2), +oy.toFixed(2), +oz.toFixed(2)], e: ends });
+  broadcast({ t: 'shot', g: key, o: [+ox.toFixed(2), +oy.toFixed(2), +oz.toFixed(2)], e: ends }, me.id);   // the shooter already drew it locally
   for (const [q, r] of dmgBy) {
-    const killed = hurtPlayer(q, r.dmg, { player: me, weapon: gd.name });
+    const killed = wave ? waves.damage(q, r.dmg, me) : hurtPlayer(q, r.dmg, { player: me, weapon: gd.name });
     send(me.ws, { t: 'hitmark', weak: r.head, dmg: Math.round(r.dmg), killed });
   }
 }
@@ -463,11 +499,31 @@ function updateArrows(dt, now) {
         if (t !== null && (!best || t < best.t - 1e-6)) best = { t, m, weak: part === 'head' };
       }
     }
-    // players can be shot too
+    // wave raiders can be shot too
     const owner0 = players.get(a.owner);
+    let wbest = null;
+    for (const wm of waves.mobs.values()) {
+      if (Math.abs(wm.x - p0.x) > 60 || Math.abs(wm.z - p0.z) > 60) continue;
+      for (const [cy, r, head] of waves.spheresOf(wm)) {
+        const t = segSphere(p0, p1, { x: wm.x, y: cy, z: wm.z, r });
+        if (t !== null && (!wbest || t < wbest.t)) wbest = { t, m: wm, weak: head };
+      }
+    }
+    if (wbest && (!best || wbest.t < best.t)) {
+      const def = ARROW_DEF[a.type];
+      const bow = owner0 ? (owner0.inv.bow | 0) : 0;
+      let dmg = def.dmg * (BOW_MULT[bow] || 1) * (0.35 + 0.65 * a.draw);
+      if (wbest.weak) dmg *= WEAK_MULT;
+      const killed = waves.damage(wbest.m, dmg, owner0);
+      if (owner0) send(owner0.ws, { t: 'hitmark', weak: wbest.weak, dmg: Math.round(dmg), killed });
+      broadcast({ t: 'arrowend', id: a.id, hit: true, x: p1.x, y: p1.y, z: p1.z });
+      arrows.delete(a.id);
+      continue;
+    }
+    // players can be shot too
     let pbest = null;
     for (const q of players.values()) {
-      if (q.id === a.owner || !q.hasPos) continue;
+      if (q.id === a.owner || !q.hasPos || q.zone === 'wave') continue;
       if (Math.abs(q.x - p0.x) > 60 || Math.abs(q.z - p0.z) > 60) continue;
       for (const [cy, r, head] of playerSpheres(q)) {
         const t = segSphere(p0, p1, { x: q.x, y: cy, z: q.z, r });
@@ -519,7 +575,7 @@ function onConnection(ws) {
   const me = {
     id, name: ws.userName, x: 0, y: 60, z: 0, yaw: 0, pitch: 0, ws, inv: acct.inv,
     lastChat: 0, hasPos: false, hp: 20, maxHp: 20, lastHurt: 0, invuln: Date.now() + 3000,
-    lastShot: 0, lastMelee: 0, lastEat: 0, sentHp: 40, sl: 0, inArena: false, guns: null, gunT: {},
+    lastShot: 0, lastMelee: 0, lastEat: 0, sentHp: 40, sl: 0, zone: null, guns: null, gunT: {}, lives: 0, wkills: 0,
   };
   players.set(id, me);
 
@@ -550,7 +606,7 @@ function onConnection(ws) {
         const dx = x + 0.5 - me.x, dy = y + 0.5 - (me.y + 1.5), dz = z + 0.5 - me.z;
         if (dx * dx + dy * dy + dz * dz > 12 * 12) return; // out of reach
       }
-      if (T.inArena(x, z)) return;      // the arena is not buildable
+      if (T.isProtected(x, y, z)) return;   // arenas are indestructible: players and any future explosion must pass this check
       if (b === 0 && y === 0) return;   // the bottom layer is bedrock
       const k = `${x},${y},${z}`;
       // breaking a natural tree trunk or ore gives its drop (once per block)
@@ -565,14 +621,23 @@ function onConnection(ws) {
       if (now - me.lastChat < 500) return;
       me.lastChat = now;
       const text = String(m.text || '').slice(0, 200).trim();
-      if (text === '/arena') {
-        const sp = pickArenaSpawn(me);
-        me.x = sp.x; me.y = sp.y; me.z = sp.z; me.hasPos = false; me.invuln = now + 2000;
-        send(ws, { t: 'respawn', x: sp.x, z: sp.z, msg: 'Teleported to the arena' });
-      } else if (text === '/spawn') {
-        me.x = SPAWN.x; me.y = 60; me.z = SPAWN.z; me.hasPos = false; me.invuln = now + 2000;
-        send(ws, { t: 'respawn', x: SPAWN.x, z: SPAWN.z, msg: 'Teleported to spawn' });
-      } else if (text) broadcast({ t: 'chat', name: me.name, text });
+      if (text === '/arena') teleport(me, 'ffa');
+      else if (text === '/waves' || text === '/wave') teleport(me, 'wave');
+      else if (text === '/spawn') teleport(me, 'spawn');
+      else if (text) broadcast({ t: 'chat', name: me.name, text });
+    } else if (m.t === 'goto') {
+      if (now - me.lastChat < 500) return;
+      me.lastChat = now;
+      if (['ffa', 'wave', 'spawn'].includes(m.where)) teleport(me, m.where);
+    } else if (m.t === 'wmelee') {
+      if (now - me.lastMelee < 350 || me.zone !== 'wave') return;
+      const wm = waves.mobs.get(m.id);
+      if (!wm) return;
+      if (Math.hypot(wm.x - me.x, (wm.y + 0.9) - (me.y + 1.6), wm.z - me.z) > 4.6 + 0.4 * waves.DEF[wm.kind].scale) return;
+      me.lastMelee = now;
+      const dmg = SWORD_DMG[Math.min(2, me.inv.sword | 0)];
+      const killed = waves.damage(wm, dmg, me);
+      send(ws, { t: 'hitmark', weak: false, dmg, killed });
     } else if (m.t === 'melee') {
       if (now - me.lastMelee < 350) return;
       const mob = mobsys.mobs.get(m.id);
@@ -610,7 +675,7 @@ function onConnection(ws) {
     } else if (m.t === 'pmelee') {
       if (now - me.lastMelee < 350) return;
       const q = players.get(m.id);
-      if (!q || q === me || !q.hasPos) return;
+      if (!q || q === me || !q.hasPos || me.zone === 'wave' || q.zone === 'wave') return;   // co-op inside the fortress
       if (Math.hypot(q.x - me.x, (q.y + 0.9) - (me.y + 1.6), q.z - me.z) > 4.8) return;
       me.lastMelee = now;
       const tier = Math.min(2, me.inv.sword | 0);
@@ -621,7 +686,7 @@ function onConnection(ws) {
       send(q.ws, { t: 'kb', vx: kx / kl * 7, vy: 4, vz: kz / kl * 7 });
     } else if (m.t === 'gun') {
       const gd = GUNS[m.g];
-      if (!gd || !me.inArena || !me.guns || (me.guns[m.g] | 0) <= 0) return;
+      if (!gd || !me.zone || !me.guns || (me.guns[m.g] | 0) <= 0) return;
       if (now - (me.gunT[m.g] || 0) < gd.cd - 25) return;
       let { dx, dy, dz } = m;
       if (![dx, dy, dz].every(Number.isFinite)) return;
@@ -679,10 +744,24 @@ function startLoops() {
     mobsys.update(dt, now, list);
     updateArrows(dt, now);
     for (const p of list) {
-      if (p.hasPos) { const ia = T.inArena(p.x, p.z); if (ia !== p.inArena) setArena(p, ia); }
+      if (p.hasPos) { const z = T.zoneAt(p.x, p.z); if (z !== p.zone) setZone(p, z); }
+    }
+    const inWave = list.filter(p => p.zone === 'wave' && p.hasPos);
+    waves.update(dt, now, inWave, list.filter(p => p.zone === 'wave'));
+    if (inWave.length && tickN % 2 === 0) {
+      const msg = JSON.stringify({ t: 'wmobs', m: waves.snapshot(now) });
+      for (const p of inWave) p.ws.send(msg);
+    }
+    if (inWave.length && tickN % 10 === 0) {
+      const W = waves.W;
+      const msg = JSON.stringify({
+        t: 'wave', n: W.wave, phase: W.phase, left: waves.alive(), total: W.total, cd: Math.max(0, Math.ceil((W.nextAt - now) / 1000)),
+        list: inWave.map(p => [p.name, p.wkills | 0, p.lives]).sort((a, b) => b[1] - a[1]),
+      });
+      for (const p of inWave) p.ws.send(msg);
     }
     if (tickN % 20 === 0) {
-      const inA = list.filter(p => p.inArena);
+      const inA = list.filter(p => p.zone === 'ffa');
       if (inA.length) {
         const rows = inA.map(p => { const st = statOf(p); return [p.name, st.k, st.d]; }).sort((a, b) => b[1] - a[1] || a[2] - b[2]).slice(0, 8);
         const msg = JSON.stringify({ t: 'score', list: rows });
@@ -721,6 +800,30 @@ import('./public/terrain.mjs').then(mod => {
     onHurtPlayer: (p, dmg, mob) => hurtPlayer(p, dmg, { label: 'a ' + mobsys.TYPES[mob.type].label }),
     onGone: id => broadcast({ t: 'mobdie', id, gone: true }),
     isNight,
+  });
+  const zonePlayers = () => [...players.values()].filter(p => p.zone === 'wave' && p.hasPos);
+  const toWave = obj => { const m = JSON.stringify(obj); for (const p of players.values()) if (p.zone === 'wave') p.ws.send(m); };
+  waves = createWaves(T, {
+    onHurtPlayer: (p, dmg, src) => hurtPlayer(p, dmg, src),
+    playersInZone: zonePlayers,
+    playerSpheres,
+    onShot: (o, e, g) => toWave({ t: 'shot', g, raw: 1, o: o.map(v => +v.toFixed(2)), e: [e.map(v => +v.toFixed(2))] }),
+    onBreak: n => toWave({ t: 'toast', text: n === 1 ? 'Raiders incoming - hold the keep!' : `Wave ${n - 1} cleared! Next wave soon...`, color: '#8fe388' }),
+    onWaveStart: n => toWave({ t: 'toast', text: `WAVE ${n}`, color: '#ff8a5a' }),
+    onWaveClear: () => {
+      for (const p of zonePlayers()) {                      // breather: full heal and fresh ammo
+        p.hp = p.maxHp; sendHp(p); p.guns = freshGuns(1.5); send(p.ws, { t: 'ammo', guns: p.guns });
+      }
+    },
+    onKill: (m, killer) => {
+      toWave({ t: 'wdie', id: m.id });
+      if (killer && killer.zone === 'wave') {
+        killer.wkills = (killer.wkills | 0) + 1;
+        for (const [g, def] of Object.entries(GUNS)) killer.guns[g] = Math.min(Math.round(def.ammo * 1.5), (killer.guns[g] | 0) + Math.ceil(def.ammo * 0.06));
+        send(killer.ws, { t: 'ammo', guns: killer.guns });
+      }
+    },
+    onReset: () => toWave({ t: 'wmobs', m: [] }),
   });
   startLoops();
   server.listen(PORT, () => console.log(`Cursed Lands server on :${PORT}`));

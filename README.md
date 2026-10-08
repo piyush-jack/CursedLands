@@ -83,10 +83,26 @@ Cloudflare Pages / Netlify / Vercel will NOT work, they cannot hold WebSocket co
 3. Taming/overriding mobs (Horizon style), mounts
 4. The ending loop: the Curse passes to the winner, who becomes a Titan in the next world
 
-## PvP and the Arena
+## PvP, the Arena and the Wave Arena
 - Swords and arrows hurt other players anywhere in the world (damage is scaled for 20 HP). Melee knocks the victim back. Dying in the open sends you to spawn.
-- **The Arena** is a walled pit with a ziggurat, pillars, cover and four climbable corner towers, placed from the world seed (the top-left info panel shows its distance and direction, or type `/arena` in chat to teleport there, `/spawn` to come back). It is not buildable.
-- Stepping inside makes it a **free for all**: hotbar slots 3-6 become guns with ammo (refilled on every respawn, plus a top-up and +3 hearts per kill). A scoreboard of kills / deaths shows at the top.
+- **Press M for the travel menu** (Free-for-all Arena, Wave Arena, Back to Spawn), or type `/arena`, `/waves`, `/spawn` in chat. The top-left info panel shows how far each arena is and which way.
+- Both arenas are **indestructible**: blocks inside them cannot be broken or placed by players, and the server refuses any edit there (`T.isProtected`, so a future TNT / explosion must go through the same check). The land around each one is smoothed down to the arena floor, so there are no cliffs.
+- Stepping inside either arena hands out guns on hotbar slots 3-6.
+
+### Free-for-all Arena
+A walled pit with a ziggurat, pillars, cover and four climbable corner towers. Every player for themselves, kill / death scoreboard at the top, ammo refilled on every respawn plus a top-up and +3 hearts per kill.
+
+### Wave Arena (co-op survival)
+A fortress with four doors and a stepped keep with a parapet. Raiders walk out of the doors in waves and hunt everyone inside; you have 3 lives each, are healed and re-armed between waves, and the run restarts when the fortress is empty.
+
+| Raider | Weapon | Notes |
+|---|---|---|
+| Raider | sword | runs straight at you |
+| Gunner | pistol | keeps its distance and strafes (from wave 2) |
+| Brute | axe | big, slow, 100 HP (from wave 3) |
+| Warlord | rifle | boss, every fifth wave |
+
+Your guns do double damage against raiders, kills top up your ammo, and swords and arrows work too.
 
 | Gun | Damage | Fire rate | Notes |
 |---|---|---|---|
@@ -95,4 +111,4 @@ Cloudflare Pages / Netlify / Vercel will NOT work, they cannot hold WebSocket co
 | Shotgun | 8 pellets x 3.5 | 1.2/s | deadly up close |
 | Sniper | 15 | 0.7/s | right click zooms, headshot = 30 |
 
-Headshots do double damage (the shotgun 1.5x). Guns are server-side hitscan and only work inside the arena. `/arena` and `/spawn` are the only chat commands.
+Headshots do double damage (the shotgun 1.5x). Guns are server-side hitscan and only work inside the arenas. Your own shots are drawn instantly from the muzzle of the gun to where your crosshair lands; the server does the hit check.
