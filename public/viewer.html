@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Mob viewer</title>
+<style>
+  html,body{margin:0;height:100%;background:#1b2330;color:#ddd;font-family:ui-monospace,Menlo,Consolas,monospace;overflow:hidden}
+  #ui{position:fixed;left:10px;top:10px;z-index:2;font-size:12px}
+  button{margin:2px;padding:5px 9px;background:#2d3a4f;border:1px solid #4a5a75;color:#fff;border-radius:5px;cursor:pointer;font:inherit}
+  button.on{background:#7b4bd6}
+  canvas{display:block}
+</style></head>
+<body>
+<div id="ui"></div>
+<canvas id="c"></canvas>
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
+import { createMob, addCreatureLights, MOB_TYPES } from './creatures.js';
+
+const params = new URLSearchParams(location.search);
+const canvas = document.getElementById('c');
+const W = parseInt(params.get('w') || window.innerWidth), H = parseInt(params.get('h') || window.innerHeight);
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H);
+renderer.setScissorTest(true);
+
+function makeScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x8ec9f0);
+  addCreatureLights(scene);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshLambertMaterial({ color: 0x5a9a3a }));
+  ground.rotation.x = -Math.PI / 2; scene.add(ground);
+  const grid = new THREE.GridHelper(20, 20, 0x3d7a28, 0x4d8a32); grid.position.y = 0.01; scene.add(grid);
+  return scene;
+}
+const cam = new THREE.PerspectiveCamera(38, 1, 0.05, 100);
+
+// simulate a creature into a pose: settle the joints, then run the walk cycle to a given time
+function posed(type, state, seconds) {
+  const m = createMob(type);
+  const dt = 1 / 30;
+  m.phase = 0;
+  for (let i = 0; i < Math.round(seconds * 30) + 60; i++) m.animate(dt, state);
+  return m;
+}
+function drawCell(scene, mob, x, y, w, h, yaw, pitch, dist, target) {
+  renderer.setViewport(x, y, w, h); renderer.setScissor(x, y, w, h);
+  cam.aspect = w / h; cam.updateProjectionMatrix();
+  const t = target || [0, 0.75, 0];
+  cam.position.set(t[0] + Math.sin(yaw) * Math.cos(pitch) * dist, t[1] + Math.sin(pitch) * dist, t[2] + Math.cos(yaw) * Math.cos(pitch) * dist);
+  cam.lookAt(t[0], t[1], t[2]);
+  scene.add(mob.group); renderer.render(scene, cam); scene.remove(mob.group);
+}
+
+const STATES = {
+  idle:  { speed: 0 }, walk: { speed: 1.6 }, run: { speed: 6.5 },
+  graze: { speed: 0, graze: true }, alert: { speed: 0, alert: true }, stun: { speed: 0, stun: true }, leader: { speed: 0, leader: true },
+};
+
+if (params.get('cfg')) {
+  // sheet mode (used for automated screenshots): cfg = [{type,state,yaw,pitch,dist,t,target}, ...]
+  const cfg = JSON.parse(params.get('cfg'));
+  const cols = parseInt(params.get('cols') || cfg.length);
+  const rows = Math.ceil(cfg.length / cols);
+  const cw = Math.floor(W / cols), ch = Math.floor(H / rows);
+  const scene = makeScene();
+  document.getElementById('ui').style.display = 'none';
+  renderer.setClearColor(0x8ec9f0);
+  cfg.forEach((c, i) => {
+    const mob = posed(c.type, STATES[c.state || 'idle'], c.t || 0);
+    const col = i % cols, row = Math.floor(i / cols);
+    drawCell(scene, mob, col * cw, H - (row + 1) * ch, cw, ch, c.yaw ?? 0.6, c.pitch ?? 0.2, c.dist ?? 4.2, c.target);
+  });
+  window.DONE = true;
+} else {
+  // interactive mode
+  const scene = makeScene();
+  let type = 'pig', stateName = 'walk', yaw = 0.7, pitch = 0.2, dist = 4.5, mob = null;
+  const ui = document.getElementById('ui');
+  function rebuild() { mob = createMob(type); }
+  function buildUi() {
+    ui.innerHTML = '';
+    for (const t of MOB_TYPES) { const b = document.createElement('button'); b.textContent = t; b.className = t === type ? 'on' : ''; b.onclick = () => { type = t; rebuild(); buildUi(); }; ui.appendChild(b); }
+    ui.appendChild(document.createElement('br'));
+    for (const s of Object.keys(STATES)) { const b = document.createElement('button'); b.textContent = s; b.className = s === stateName ? 'on' : ''; b.onclick = () => { stateName = s; buildUi(); }; ui.appendChild(b); }
+    const p = document.createElement('div'); p.textContent = 'drag to rotate, wheel to zoom'; ui.appendChild(p);
+  }
+  rebuild(); buildUi();
+  let drag = false, lx = 0, ly = 0;
+  canvas.onmousedown = e => { drag = true; lx = e.clientX; ly = e.clientY; };
+  window.onmouseup = () => drag = false;
+  window.onmousemove = e => { if (!drag) return; yaw -= (e.clientX - lx) * 0.01; pitch = Math.max(-0.2, Math.min(1.3, pitch + (e.clientY - ly) * 0.01)); lx = e.clientX; ly = e.clientY; };
+  canvas.onwheel = e => { dist = Math.max(1.5, Math.min(12, dist + e.deltaY * 0.005)); };
+  let last = performance.now();
+  (function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    mob.animate(dt, STATES[stateName]);
+    drawCell(scene, mob, 0, 0, W, H, yaw, pitch, dist);
+  })(last);
+}
+</script></body></html>

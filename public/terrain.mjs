@@ -1,0 +1,129 @@
+// Shared by the browser client and the Node server so both agree on the ground.
+export const CS = 16;   // chunk width/depth
+export const CH = 64;   // world height
+export const SEA = 28;  // water fills columns lower than this
+export let SEED = 1337;
+export function setSeed(s) { SEED = s; }
+
+// block ids (shared with the client block table)
+export const B = {
+  AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, LOG: 5, LEAVES: 6, SNOW: 7, PLANKS: 8, WATER: 9,
+  COBBLE: 10, GRAVEL: 11, BEDROCK: 12, COAL_ORE: 13, IRON_ORE: 14, DIAMOND_ORE: 15, CACTUS: 16, SPRUCE_LEAVES: 17,
+};
+
+export function hash2(x, z, s) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ Math.imul(s, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+export function hash3(x, y, z, s) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 1103515245) ^ Math.imul(z, 668265263) ^ Math.imul(s, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+const smooth = t => t * t * (3 - 2 * t);
+function vnoise(x, z, s) {
+  const xi = Math.floor(x), zi = Math.floor(z);
+  const xf = smooth(x - xi), zf = smooth(z - zi);
+  const a = hash2(xi, zi, s), b = hash2(xi + 1, zi, s), c = hash2(xi, zi + 1, s), d = hash2(xi + 1, zi + 1, s);
+  return a + (b - a) * xf + (c - a) * zf + (a - b - c + d) * xf * zf;
+}
+function fbm(x, z) {
+  let v = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { v += vnoise(x * f, z * f, SEED + i * 101) * amp; f *= 2; amp *= 0.5; }
+  return v;
+}
+export function heightAt(x, z) {
+  const n = Math.max(0, Math.min(1, (fbm(x * 0.008, z * 0.008) - 0.47) * 2.2 + 0.5)); // stretch contrast: real hills, valleys, peaks
+  const m = fbm(x * 0.03 + 100, z * 0.03 + 100);
+  return Math.min(52, Math.floor(14 + n * 38 + m * 6));
+}
+
+/* ---------- biomes ---------- */
+export const BIOME = { PLAINS: 0, FOREST: 1, DESERT: 2, SNOW: 3 };
+export function biomeAt(x, z) {
+  const t = vnoise(x * 0.0045 + 500, z * 0.0045 + 500, SEED + 31);   // temperature
+  const m = vnoise(x * 0.006 - 700, z * 0.006 - 700, SEED + 47);     // moisture
+  if (t < 0.3) return BIOME.SNOW;
+  if (t > 0.68 && m < 0.55) return BIOME.DESERT;
+  return m > 0.52 ? BIOME.FOREST : BIOME.PLAINS;
+}
+// block ids for the top layer and the few layers under it
+export function surfaceAt(x, z, h) {
+  if (h >= 46) return { top: B.SNOW, sub: B.DIRT };
+  const bio = biomeAt(x, z);
+  if (h <= SEA + 1) {                                   // shore and lake bed
+    const g = vnoise(x * 0.09, z * 0.09, SEED + 71);
+    if (h < SEA - 2 && g > 0.62) return { top: B.GRAVEL, sub: B.GRAVEL };
+    return { top: B.SAND, sub: B.SAND };
+  }
+  if (bio === BIOME.DESERT) return { top: B.SAND, sub: B.SAND };
+  if (bio === BIOME.SNOW) return { top: B.SNOW, sub: B.DIRT };
+  return { top: B.GRASS, sub: B.DIRT };
+}
+
+/* ---------- surface features: 1 oak, 2 cactus, 3 spruce ---------- */
+export function featureAt(x, z, h) {
+  if (h <= SEA + 2 || h >= 44) return 0;
+  const bio = biomeAt(x, z);
+  const r = hash2(x, z, SEED + 7);
+  if (bio === BIOME.FOREST) return r < 0.026 ? 1 : 0;
+  if (bio === BIOME.PLAINS) return r < 0.0035 ? 1 : 0;
+  if (bio === BIOME.DESERT) return r < 0.004 ? 2 : 0;
+  return r < 0.012 ? 3 : 0;
+}
+export function treeAt(x, z, h) { return featureAt(x, z, h) > 0; }   // anything solid standing on the column
+export function trunkHeight(x, z) {
+  const k = featureAt(x, z, heightAt(x, z));
+  const r = hash2(x, z, SEED + 9);
+  if (k === 2) return 1 + Math.floor(r * 3);          // cactus
+  if (k === 3) return 5 + Math.floor(r * 3);          // spruce
+  return 4 + Math.floor(r * 2);                       // oak
+}
+// true if (x,y,z) is part of a natural, untouched tree trunk
+export function isNaturalWood(x, y, z) {
+  const h = heightAt(x, z);
+  const k = featureAt(x, z, h);
+  return (k === 1 || k === 3) && y > h && y <= h + trunkHeight(x, z);
+}
+
+/* ---------- ores (inside stone, below the dirt layer) ---------- */
+export function oreAt(x, y, z, h) {
+  if (y > h - 4 || y < 2) return 0;
+  const r = hash3(x, y, z, SEED + 13);
+  if (r > 0.04) return 0;
+  const cell = hash3(x >> 1, y >> 1, z >> 1, SEED + 17);          // clumps ore into small veins
+  if (cell > 0.5) return 0;
+  const k = hash3(x, y, z, SEED + 19);
+  if (y < 14 && r < 0.004) return B.DIAMOND_ORE;
+  if (y < 38 && k < 0.32) return B.IRON_ORE;
+  if (k < 0.75) return B.COAL_ORE;
+  return 0;
+}
+// natural ore block at a position, or 0 (used by the server to give drops once)
+export function naturalOre(x, y, z) {
+  const h = heightAt(x, z);
+  if (y >= h - 3) return 0;
+  return oreAt(x, y, z, h);
+}
+
+// no tree or cactus within a few blocks, so the player never spawns under a canopy
+function openGround(x, z) {
+  for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) if (treeAt(x + dx, z + dz, heightAt(x + dx, z + dz))) return false;
+  return true;
+}
+// nearest dry, tree-free column to the origin (spiral search)
+export function spawnPoint() {
+  for (let r = 0; r < 120; r++) {
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+        const h = heightAt(dx, dz);
+        if (h >= SEA + 2 && h < 40 && !treeAt(dx, dz, h) && openGround(dx, dz)) return { x: dx + 0.5, z: dz + 0.5 };
+      }
+    }
+  }
+  return { x: 0.5, z: 0.5 };
+}

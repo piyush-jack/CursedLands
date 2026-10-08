@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cursed Lands</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0f14;font-family:ui-monospace,Menlo,Consolas,monospace;color:#e8e8e8}
+  canvas{display:block}
+  #auth{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 30%,#2a1f3d,#0b0f14 70%);z-index:10}
+  #authbox{width:320px;padding:26px;background:#141a22cc;border:1px solid #3a2f55;border-radius:10px}
+  #authbox h1{margin:0 0 4px;font-size:26px;letter-spacing:2px;color:#c9a7ff}
+  #authbox p{margin:0 0 16px;font-size:12px;color:#9aa}
+  #authbox input{width:100%;box-sizing:border-box;margin:5px 0;padding:10px;background:#0b0f14;border:1px solid #333;color:#fff;border-radius:6px;font:inherit}
+  #authbox button{width:100%;margin-top:8px;padding:10px;border:0;border-radius:6px;background:#7b4bd6;color:#fff;font:inherit;cursor:pointer}
+  #authbox button.alt{background:transparent;border:1px solid #444;color:#aaa}
+  #err{min-height:18px;color:#ff7a7a;font-size:12px;margin-top:6px}
+  #hud{position:fixed;inset:0;pointer-events:none;display:none}
+  #cross{position:absolute;left:50%;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px}
+  #cross:before,#cross:after{content:"";position:absolute;background:#fff;opacity:.8}
+  #cross:before{left:8px;top:0;width:2px;height:18px}
+  #cross:after{top:8px;left:0;height:2px;width:18px}
+  #cross.hit:before,#cross.hit:after{background:#ff4040;opacity:1}
+  #cross.weak:before,#cross.weak:after{background:#ffd23a;opacity:1;box-shadow:0 0 8px #ffd23a}
+  #draw{position:absolute;left:50%;top:calc(50% + 24px);width:90px;height:6px;margin-left:-45px;background:#0008;border:1px solid #fff6;display:none}
+  #draw i{display:block;height:100%;width:0;background:#7be0ff}
+  #hotbar{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:4px}
+  .slot{width:48px;height:48px;border:3px solid #3a3a3a;border-top-color:#6a6a6a;border-left-color:#6a6a6a;background:#000a;box-sizing:border-box;position:relative;display:flex;align-items:center;justify-content:center}
+  .slot.sel{border-color:#fff;background:#fff3}
+  .slot img{width:36px;height:36px;image-rendering:pixelated}
+  .slot b{position:absolute;left:2px;top:0;font-size:10px;color:#ddd;text-shadow:1px 1px 0 #000}
+  #bars{position:absolute;left:50%;bottom:68px;transform:translateX(-50%);width:230px;text-align:center}
+  #hpbar{height:10px;background:#0009;border:1px solid #fff5}
+  #hpbar i{display:block;height:100%;width:100%;background:#d94a4a}
+  #equip{margin-top:5px;font-size:12px;text-shadow:0 1px 2px #000}
+  #mats{position:absolute;right:10px;top:10px;font-size:12px;line-height:1.6;text-align:right;text-shadow:0 1px 2px #000}
+  #info{position:absolute;top:8px;left:8px;font-size:12px;line-height:1.5;text-shadow:0 1px 2px #000}
+  #chat{position:absolute;left:8px;bottom:70px;width:340px;max-height:200px;overflow:hidden;font-size:13px;text-shadow:0 1px 2px #000}
+  #chat div{padding:1px 0}
+  #toast{position:absolute;left:50%;top:22%;transform:translateX(-50%);text-align:center;font-size:16px;text-shadow:0 2px 4px #000}
+  #toast div{margin:3px 0;animation:fade 2.6s forwards}
+  @keyframes fade{0%{opacity:0;transform:translateY(8px)}10%{opacity:1;transform:none}80%{opacity:1}100%{opacity:0}}
+  #hurt{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 120px 30px #d00;opacity:0;transition:opacity .4s;z-index:3}
+  #waterov{position:fixed;inset:0;pointer-events:none;background:#1a4fa055;display:none;z-index:2}
+  #chatin{position:fixed;left:8px;bottom:40px;width:340px;display:none;pointer-events:auto;box-sizing:border-box;padding:6px;background:#000a;border:1px solid #666;color:#fff;font:inherit}
+  #help{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000a;z-index:5;text-align:center;line-height:1.8}
+  #msg{position:fixed;top:40%;width:100%;text-align:center;display:none;z-index:6;font-size:20px;text-shadow:0 2px 4px #000}
+  #craft{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000b;z-index:5}
+  #craftbox{width:520px;max-width:94vw;max-height:88vh;overflow:auto;background:#141a22;border:1px solid #3a2f55;border-radius:10px;padding:18px}
+  #craftbox h2{margin:0 0 4px;color:#c9a7ff}
+  #craftbox .have{font-size:12px;color:#9aa;margin-bottom:12px}
+  .rec{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #2a3340}
+  .rec small{color:#9aa}
+  .rec .ok{color:#8fe388}.rec .no{color:#ff8a8a}
+  .rec button{padding:7px 14px;border:0;border-radius:6px;background:#7b4bd6;color:#fff;font:inherit;cursor:pointer}
+  .rec button:disabled{background:#333;color:#777;cursor:default}
+  #palette{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000b;z-index:5}
+  #palbox{width:560px;max-width:94vw;max-height:88vh;overflow:auto;background:#141a22;border:1px solid #3a2f55;border-radius:10px;padding:18px}
+  #palbox h2{margin:0 0 4px;color:#c9a7ff}
+  #palbox .have{font-size:12px;color:#9aa;margin-bottom:12px}
+  #palbox .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .pal{display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 4px;background:#0b0f14;border:2px solid #2a3340;border-radius:6px;cursor:pointer;text-align:center}
+  .pal:hover{border-color:#7b4bd6}.pal.cur{border-color:#fff}
+  .pal img{width:48px;height:48px;image-rendering:pixelated}
+  .pal small{font-size:11px;color:#ccd}
+</style>
+</head>
+<body>
+<div id="auth">
+  <div id="authbox">
+    <h1>CURSED LANDS</h1>
+    <p>Mine, build and survive the night. Play together in your browser.</p>
+    <input id="user" placeholder="Username" maxlength="16" autocomplete="username">
+    <input id="pass" type="password" placeholder="Password (6+ chars)" autocomplete="current-password">
+    <button id="login">Log in</button>
+    <button id="register" class="alt">Create account</button>
+    <div id="err"></div>
+  </div>
+</div>
+<div id="waterov"></div>
+<div id="hurt"></div>
+<div id="hud">
+  <div id="cross"></div>
+  <div id="draw"><i></i></div>
+  <div id="info"></div>
+  <div id="mats"></div>
+  <div id="toast"></div>
+  <div id="chat"></div>
+  <div id="bars"><div id="hpbar"><i></i></div><div id="equip"></div></div>
+  <div id="hotbar"></div>
+</div>
+<input id="chatin" maxlength="200" placeholder="Say something... (Enter to send, Esc to cancel)">
+<div id="craft"><div id="craftbox"></div></div>
+<div id="palette"><div id="palbox"></div></div>
+<div id="help">
+  <div>
+    <h2>Paused</h2>
+    <div>Click to play</div>
+    <div style="color:#9aa;margin-top:10px">
+      WASD move &nbsp; Space jump / swim &nbsp; Shift sprint &nbsp; F fly<br>
+      1 sword &nbsp; 2 bow &nbsp; 3-9 blocks &nbsp; wheel cycles<br>
+      Left click: swing / mine &nbsp; Right click: place block &nbsp; Bow: hold left click, release to shoot<br>
+      Headshots on mobs hit weak points for big damage<br>
+      Q block palette &nbsp; E crafting &nbsp; R switch arrow &nbsp; G eat raw meat &nbsp; Enter chat<br>
+      Zombies and spiders roam at night. Dig for coal, iron and diamond.
+    </div>
+  </div>
+</div>
+<div id="msg"></div>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+<script type="module" src="game.js"></script>
+</body>
+</html>
